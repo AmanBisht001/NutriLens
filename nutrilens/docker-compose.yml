@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: nutrilens_db
+    restart: always
+    environment:
+      POSTGRES_USER: nutrilens_user
+      POSTGRES_PASSWORD: nutrilens_password
+      POSTGRES_DB: nutrilens_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nutrilens_user -d nutrilens_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nutrilens_backend
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://nutrilens_user:nutrilens_password@db:5432/nutrilens_db
+      - ENVIRONMENT=development
+      - DEBUG=True
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nutrilens_frontend
+    restart: always
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
