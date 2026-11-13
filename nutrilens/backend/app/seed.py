@@ -16,9 +16,16 @@ Usage:
     .\\venv\\Scripts\\python.exe -m app.seed
 """
 import sys
+from pathlib import Path
 import logging
 import uuid
 from datetime import datetime, timezone
+
+# Ensure the backend root (containing the 'app' module) is always in sys.path
+_backend_dir = str(Path(__file__).resolve().parent.parent)
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 from sqlalchemy.orm import Session
 
 from app.core.security import get_password_hash

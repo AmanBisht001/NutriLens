@@ -1,4 +1,11 @@
+import sys
+from pathlib import Path
 from logging.config import fileConfig
+
+# Ensure the backend root (containing the 'app' module) is in sys.path
+_backend_dir = str(Path(__file__).resolve().parent.parent)
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
