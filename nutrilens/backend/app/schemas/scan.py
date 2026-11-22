@@ -128,6 +128,7 @@ class ScanHistoryItem(BaseModel):
     rating_label: Optional[str] = None
     rating_color: Optional[str] = None
     image_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
     ocr_confidence: float = 0.0
     ocr_engine: str = "paddleocr"
     is_scoreable: bool = False

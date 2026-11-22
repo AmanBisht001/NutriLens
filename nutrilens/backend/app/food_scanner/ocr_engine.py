@@ -13,11 +13,33 @@ import cv2
 logger = logging.getLogger(__name__)
 
 
+import os
+import gc
+
+# Configure lightweight single-threaded CPU execution to reduce memory overhead on constrained cloud hosts
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+
 @dataclass
 class OCRLine:
     text: str
     confidence: float
     box: Optional[List[List[int]]] = None
+
+
+import os
+import gc
+
+# Configure lightweight single-threaded CPU execution to reduce memory overhead on constrained cloud hosts
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
 @dataclass
@@ -61,29 +83,37 @@ class BaseOCREngine(ABC):
 
 class PaddleOCREngine(BaseOCREngine):
     """
-    PaddleOCR implementation for multi-language text recognition
-    and text orientation angle classification.
+    PaddleOCR implementation for multi-language text recognition.
+    Optimized for low-RAM cloud hosting:
+    - use_angle_cls=False avoids loading the ~70MB angle classifier neural net
+    - enable_mkldnn=False avoids massive memory-mapped cache allocations
+    - show_log=False suppresses unnecessary stdout buffers
+    - Downscales oversized images before OCR to prevent feature map memory spikes
     """
 
-    def __init__(self, lang: str = "en", use_angle_cls: bool = True):
+    def __init__(self, lang: str = "en", use_angle_cls: bool = False):
         self.lang = lang
         self.use_angle_cls = use_angle_cls
         self._ocr = None
         self._initialized = False
+
+    def is_initialized(self) -> bool:
+        return self._initialized
 
     def _ensure_initialized(self):
         if self._initialized:
             return
         try:
             from paddleocr import PaddleOCR
-            # Initialize PaddleOCR engine with CPU configuration
+            # Initialize PaddleOCR engine with optimized CPU configuration
             self._ocr = PaddleOCR(
                 use_angle_cls=self.use_angle_cls,
                 lang=self.lang,
                 enable_mkldnn=False,
+                show_log=False,
             )
             self._initialized = True
-            logger.info("PaddleOCR engine initialized successfully.")
+            logger.info("PaddleOCR engine initialized successfully (single-threaded, angle_cls=False).")
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR: {e}")
             raise RuntimeError(
@@ -110,6 +140,14 @@ class PaddleOCREngine(BaseOCREngine):
                 notes="Failed to decode image input.",
             )
 
+        # Ensure max dimension does not exceed 1600px to avoid memory spikes in feature maps
+        h, w = img_cv.shape[:2]
+        max_dim = max(h, w)
+        if max_dim > 1600:
+            scale = 1600.0 / max_dim
+            new_w, new_h = int(w * scale), int(h * scale)
+            img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
         # Ensure image has 3 channels for PaddleOCR
         if len(img_cv.shape) == 2:
             img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
@@ -129,6 +167,10 @@ class PaddleOCREngine(BaseOCREngine):
 
         raw_text = "\n".join(l.text for l in ocr_lines)
         avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+
+        # Clean up temporary buffers
+        del result
+        gc.collect()
 
         return OCRResult(
             raw_text=raw_text,

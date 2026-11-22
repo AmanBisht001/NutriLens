@@ -31,16 +31,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database table initialization deferred (db offline or unreachable): {e}")
 
-    # Pre-warm the OCR engine so the first user scan does not wait for model loading
-    try:
-        import asyncio
-        from app.food_scanner.ocr_engine import get_ocr_engine
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, get_ocr_engine)
-        logger.info("OCR engine pre-warmed successfully on startup.")
-    except Exception as e:
-        logger.warning(f"OCR engine pre-warm skipped (non-fatal): {e}")
-
+    # Keep startup lightweight to avoid OOM restarts on memory-constrained cloud hosts (e.g. Render 512MB RAM).
+    # Heavy models (PaddleOCR) initialize lazily on the first incoming scan request.
     yield
 
 
@@ -69,6 +61,13 @@ if settings.BACKEND_CORS_ORIGINS:
 def root_health() -> HealthResponse:
     """System health check endpoint."""
     return get_health()
+
+
+@app.get("/api/health/metrics", tags=["Health", "Monitoring"])
+def root_health_metrics():
+    """Real-time memory (RSS/VMS) and scan pipeline performance metrics."""
+    from app.api.v1.endpoints.health import get_system_metrics
+    return get_system_metrics()
 
 # Direct /api endpoints as requested in specifications
 app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])

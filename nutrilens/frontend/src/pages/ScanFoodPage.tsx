@@ -71,6 +71,7 @@ export const ScanFoodPage: React.FC = () => {
 
   // Scan execution & progress state
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
+  const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanSession, setScanSession] = useState<ScanSession | null>(null);
 
@@ -214,6 +215,7 @@ export const ScanFoodPage: React.FC = () => {
   // Automated Scan Execution & Multi-Stage Progression
   // ---------------------------------------------------------------------------
   const executeAutomatedScan = async (imageToScan?: QueuedImage) => {
+    if (isScanning) return; // Prevent duplicate concurrent submissions
     const targetImage = imageToScan || queuedImage;
     if (!targetImage) {
       setScanError("Please select or capture a food label image.");
@@ -221,6 +223,7 @@ export const ScanFoodPage: React.FC = () => {
     }
 
     setScanError(null);
+    setIsScanning(true);
     setViewMode("processing");
     setCurrentStepIndex(0);
 
@@ -252,6 +255,7 @@ export const ScanFoodPage: React.FC = () => {
 
       // Brief delay so user sees final "Preparing your report..."
       setTimeout(() => {
+        setIsScanning(false);
         setScanSession(session);
         initializeEditForm(session);
         setViewMode("results");
@@ -260,6 +264,7 @@ export const ScanFoodPage: React.FC = () => {
         queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       }, 500);
     } catch (err: any) {
+      setIsScanning(false);
       clearInterval(interval);
       setViewMode("scan");
       let msg: string =
@@ -1298,10 +1303,11 @@ export const ScanFoodPage: React.FC = () => {
             <Button
               variant="default"
               size="sm"
+              disabled={isScanning}
               onClick={() => executeAutomatedScan()}
               className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
             >
-              <Sparkles className="h-4 w-4" /> Analyze Label
+              <Sparkles className="h-4 w-4" /> {isScanning ? "Analyzing..." : "Analyze Label"}
             </Button>
           </div>
         </Card>

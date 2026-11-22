@@ -292,6 +292,7 @@ export interface ScanHistoryItem {
   rating_label?: string | null;
   rating_color?: string | null;
   image_url?: string | null;
+  thumbnail_url?: string | null;
   ocr_confidence: number;
   ocr_engine: string;
   is_scoreable: boolean;

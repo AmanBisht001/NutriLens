@@ -9,7 +9,7 @@ import io
 import json
 import base64
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -78,8 +78,34 @@ def _clean_json_response(raw_text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def prepare_vision_image_bytes(
+    image_bytes: bytes,
+    max_dim: int = 1280,
+    quality: int = 80,
+) -> Tuple[bytes, str]:
+    """
+    Downsamples and compresses image bytes to a lightweight JPEG (~150-250KB)
+    specifically for Vision LLM upload. Avoids large memory allocations and slow network uploads.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as pil_img:
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            w, h = pil_img.size
+            if max(w, h) > max_dim:
+                scale = float(max_dim) / max(w, h)
+                pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+
+            out_buf = io.BytesIO()
+            pil_img.save(out_buf, format="JPEG", quality=quality, optimize=True)
+            return out_buf.getvalue(), "image/jpeg"
+    except Exception as e:
+        logger.warning(f"Vision image optimization fallback to original: {e}")
+        return image_bytes, "image/jpeg"
+
+
 class MultimodalVisionExtractor:
-    """Orchestrates vision extraction using Gemini or OpenAI."""
+    """Orchestrates vision extraction using Gemini or OpenAI with client caching and image compression."""
 
     def __init__(self):
         self.gemini_api_key = (
@@ -87,6 +113,8 @@ class MultimodalVisionExtractor:
             or os.getenv("GOOGLE_API_KEY")
         )
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self._gemini_client = None
+        self._openai_client = None
 
     def is_available(self) -> bool:
         return bool(self.gemini_api_key or self.openai_api_key)
@@ -101,9 +129,12 @@ class MultimodalVisionExtractor:
             logger.info("No vision LLM API key configured (GEMINI_API_KEY / OPENAI_API_KEY).")
             return None
 
+        # Compress and downsample image before sending over network
+        comp_bytes, comp_mime = prepare_vision_image_bytes(image_bytes)
+
         if self.gemini_api_key:
             try:
-                res = self._extract_with_gemini(image_bytes, mime_type)
+                res = self._extract_with_gemini(comp_bytes, comp_mime)
                 if res:
                     return res
             except Exception as e:
@@ -111,7 +142,7 @@ class MultimodalVisionExtractor:
 
         if self.openai_api_key:
             try:
-                res = self._extract_with_openai(image_bytes, mime_type)
+                res = self._extract_with_openai(comp_bytes, comp_mime)
                 if res:
                     return res
             except Exception as e:
@@ -127,8 +158,10 @@ class MultimodalVisionExtractor:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=self.gemini_api_key)
-        response = client.models.generate_content(
+        if self._gemini_client is None:
+            self._gemini_client = genai.Client(api_key=self.gemini_api_key)
+
+        response = self._gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
@@ -153,11 +186,13 @@ class MultimodalVisionExtractor:
     ) -> Optional[Dict[str, Any]]:
         from openai import OpenAI
 
-        client = OpenAI(api_key=self.openai_api_key)
+        if self._openai_client is None:
+            self._openai_client = OpenAI(api_key=self.openai_api_key, timeout=15.0)
+
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:{mime_type};base64,{b64_image}"
 
-        response = client.chat.completions.create(
+        response = self._openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
@@ -166,7 +201,7 @@ class MultimodalVisionExtractor:
                         {"type": "text", "text": EXTRACTION_PROMPT},
                         {
                             "type": "image_url",
-                            "image_url": {"url": data_url, "detail": "high"},
+                            "image_url": {"url": data_url, "detail": "low"},
                         },
                     ],
                 }

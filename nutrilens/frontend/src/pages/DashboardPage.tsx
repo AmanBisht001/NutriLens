@@ -32,7 +32,7 @@ export const DashboardPage: React.FC = () => {
   const restrictions = user?.profile?.dietary_restrictions || [];
   const goals = user?.profile?.nutrition_goals || [];
 
-  // Fetch real scan history from backend
+  // Fetch real scan history from backend (cached for 60s to prevent spamming backend)
   const {
     data: scanHistoryData,
     isLoading: isLoadingScans,
@@ -43,6 +43,7 @@ export const DashboardPage: React.FC = () => {
     queryKey: ["scan-history", user?.id],
     queryFn: () => api.getScanHistory(1, 5),
     enabled: !!user,
+    staleTime: 60 * 1000,
   });
 
   const recentScans: ScanHistoryItem[] = scanHistoryData?.items || [];
@@ -245,10 +246,11 @@ export const DashboardPage: React.FC = () => {
                       className="p-4 flex items-center justify-between hover:bg-slate-50 transition cursor-pointer group"
                     >
                       <div className="flex items-center space-x-3.5 min-w-0">
-                        {scan.image_url ? (
+                        {scan.thumbnail_url || scan.image_url ? (
                           <img
-                            src={scan.image_url}
+                            src={scan.thumbnail_url || scan.image_url!}
                             alt={scan.product_name}
+                            loading="lazy"
                             className="h-12 w-12 rounded-lg object-cover border border-slate-200 bg-white shrink-0"
                           />
                         ) : (

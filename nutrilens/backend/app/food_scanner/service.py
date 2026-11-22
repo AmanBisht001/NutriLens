@@ -5,12 +5,17 @@ structured extraction, manual correction, and database confirmation into the cat
 """
 import os
 import re
+import gc
+import time
 import uuid
+import asyncio
+import collections
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import UploadFile, HTTPException, status
 from sqlalchemy.orm import Session
+import psutil
 
 from app.models.scan import ProductScan
 from app.models.product import (
@@ -25,6 +30,7 @@ from app.models.user import User
 from app.food_scanner.preprocessor import (
     validate_image_bytes,
     preprocess_image,
+    generate_thumbnail,
 )
 from app.food_scanner.ocr_engine import get_ocr_engine
 from app.food_scanner.extractor import extract_structured_label_info
@@ -39,6 +45,141 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", "scans")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# Concurrency control: limits simultaneous heavy OCR scans to 1 on memory-constrained servers (Render 512MB RAM)
+_SCAN_SEMAPHORE = asyncio.Semaphore(1)
+
+# In-memory rolling buffer of recent scan performance metrics for diagnostic monitoring
+RECENT_SCAN_METRICS = collections.deque(maxlen=100)
+
+
+def record_scan_metric(scan_id: str, total_ms: float, ocr_ms: float, vision_ms: float, prep_ms: float):
+    """Records performance timing and RAM usage for monitoring."""
+    try:
+        proc = psutil.Process()
+        mem_info = proc.memory_info()
+        rss_mb = round(mem_info.rss / (1024 * 1024), 2)
+    except Exception:
+        rss_mb = 0.0
+
+    metric = {
+        "scan_id": scan_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "total_ms": round(total_ms, 2),
+        "ocr_ms": round(ocr_ms, 2),
+        "vision_ms": round(vision_ms, 2),
+        "preprocess_ms": round(prep_ms, 2),
+        "rss_mb": rss_mb,
+    }
+    RECENT_SCAN_METRICS.append(metric)
+    logger.info(
+        f"[PERF_SCAN] scan_id={scan_id} total_ms={total_ms:.1f} ocr_ms={ocr_ms:.1f} "
+        f"vision_ms={vision_ms:.1f} prep_ms={prep_ms:.1f} rss={rss_mb}MB"
+    )
+
+
+class IngredientKnowledgeCache:
+    """
+    High-performance in-memory cache for canonical ingredients.
+    Indexes all canonical ingredients into O(1) hash maps:
+    - by_norm: Dict[normalized_name_lower, dict]
+    - by_name: Dict[name_lower, dict]
+    - by_ins: Dict[ins_code_upper, dict]
+    - by_alias: Dict[alias_lower, dict]
+    - substring_list: List[Tuple[name_lower, dict]] for fallback
+    Eliminates database roundtrips and O(N*M) nested loops on every scan.
+    """
+    _by_norm: Dict[str, Dict[str, Any]] = {}
+    _by_name: Dict[str, Dict[str, Any]] = {}
+    _by_ins: Dict[str, Dict[str, Any]] = {}
+    _by_alias: Dict[str, Dict[str, Any]] = {}
+    _substring_list: List[Tuple[str, Dict[str, Any]]] = []
+    _last_loaded: float = 0.0
+    _ttl_seconds: float = 3600.0  # 1 hour cache TTL
+
+    @classmethod
+    def get_or_refresh(cls, db: Session):
+        now = time.time()
+        if cls._last_loaded > 0 and (now - cls._last_loaded) < cls._ttl_seconds and cls._by_name:
+            return cls
+
+        try:
+            all_ings = db.query(Ingredient).all()
+            by_norm = {}
+            by_name = {}
+            by_ins = {}
+            by_alias = {}
+            sub_list = []
+
+            for ing in all_ings:
+                info = {
+                    "name": ing.name,
+                    "normalized_name": ing.normalized_name,
+                    "category": ing.category or "General",
+                    "purpose": ing.purpose or ing.description or "Ingredient component",
+                    "concern_level": ing.concern_level or "safe",
+                    "ins_number": ing.ins_number,
+                    "is_common_allergen": bool(ing.is_common_allergen),
+                    "source_reference": ing.source_reference,
+                    "description": ing.description,
+                }
+                if ing.normalized_name:
+                    by_norm[ing.normalized_name.lower().strip()] = info
+                if ing.name:
+                    nl = ing.name.lower().strip()
+                    by_name[nl] = info
+                    if len(nl) >= 4:
+                        sub_list.append((nl, info))
+                if ing.ins_number:
+                    codes = re.findall(r"\d{3,4}[a-z]?", ing.ins_number, re.IGNORECASE)
+                    for c in codes:
+                        by_ins[c.upper()] = info
+                if ing.aliases:
+                    aliases_list = [
+                        a.strip().lower()
+                        for a in ing.aliases.replace("[", "").replace("]", "").replace('"', '').split(",")
+                        if a.strip()
+                    ]
+                    for a in aliases_list:
+                        by_alias[a] = info
+
+            cls._by_norm = by_norm
+            cls._by_name = by_name
+            cls._by_ins = by_ins
+            cls._by_alias = by_alias
+            cls._substring_list = sorted(sub_list, key=lambda x: len(x[0]), reverse=True)
+            cls._last_loaded = now
+            logger.info(f"IngredientKnowledgeCache loaded {len(all_ings)} canonical ingredients into memory index.")
+        except Exception as e:
+            logger.warning(f"Failed to refresh IngredientKnowledgeCache: {e}")
+
+        return cls
+
+    @classmethod
+    def match_token(cls, token_lower: str) -> Optional[Dict[str, Any]]:
+        # 1. Exact match on normalized_name
+        if token_lower in cls._by_norm:
+            return cls._by_norm[token_lower]
+        # 2. Exact match on name
+        if token_lower in cls._by_name:
+            return cls._by_name[token_lower]
+        # 3. Check INS / E number
+        ins_match = re.search(r"\b(?:ins|e)\s*[-_]?\s*(\d{3,4}[a-z]?)\b", token_lower)
+        if ins_match:
+            code = ins_match.group(1).upper()
+            if code in cls._by_ins:
+                return cls._by_ins[code]
+        # 4. Check aliases
+        if token_lower in cls._by_alias:
+            return cls._by_alias[token_lower]
+        for a, info in cls._by_alias.items():
+            if a in token_lower:
+                return info
+        # 5. Substring match
+        for s_name, info in cls._substring_list:
+            if s_name in token_lower or token_lower in s_name:
+                return info
+        return None
+
 
 def match_and_explain_ingredients(
     ingredients: List[str],
@@ -46,6 +187,7 @@ def match_and_explain_ingredients(
 ) -> Dict[str, Any]:
     """
     Matches extracted ingredients against canonical Ingredient knowledge base.
+    Uses IngredientKnowledgeCache for O(1) in-memory index lookups instead of repetitive DB queries.
     Separates recognized ingredients (with purpose, category, concern level, INS, allergen info)
     from unrecognized ingredients.
     """
@@ -65,7 +207,8 @@ def match_and_explain_ingredients(
     unrecognized = []
     concerns = []
 
-    all_db_ingredients = db.query(Ingredient).all()
+    # Get cached indexed knowledge base (zero DB queries on repeated scans)
+    cache = IngredientKnowledgeCache.get_or_refresh(db)
 
     for token in ingredients:
         clean_token = token.strip()
@@ -73,71 +216,30 @@ def match_and_explain_ingredients(
             continue
 
         token_lower = clean_token.lower()
-        matched_ing: Optional[Ingredient] = None
+        matched_info = cache.match_token(token_lower)
 
-        # 1. Exact match on normalized_name
-        for ing in all_db_ingredients:
-            if ing.normalized_name and ing.normalized_name.lower() == token_lower:
-                matched_ing = ing
-                break
-
-        # 2. Case-insensitive exact name
-        if not matched_ing:
-            for ing in all_db_ingredients:
-                if ing.name and ing.name.lower() == token_lower:
-                    matched_ing = ing
-                    break
-
-        # 3. Check INS number / E-number in token (e.g. E300, E102, INS 500)
-        if not matched_ing:
-            ins_match = re.search(r"\b(?:ins|e)\s*[-_]?\s*(\d{3,4}[a-z]?)\b", token_lower)
-            if ins_match:
-                ins_code = ins_match.group(1).upper()
-                for ing in all_db_ingredients:
-                    if ing.ins_number and (ins_code in ing.ins_number.upper() or f"E{ins_code}" in ing.ins_number.upper()):
-                        matched_ing = ing
-                        break
-
-        # 4. Check aliases if stored
-        if not matched_ing:
-            for ing in all_db_ingredients:
-                if ing.aliases:
-                    aliases_list = [
-                        a.strip().lower()
-                        for a in ing.aliases.replace("[", "").replace("]", "").replace('"', '').split(",")
-                    ]
-                    if any(a and a in token_lower for a in aliases_list):
-                        matched_ing = ing
-                        break
-
-        # 5. Substring match (e.g. "Wheat Flour" in "Refined Wheat Flour", or "Sugar" in "Sugar (Sucrose)")
-        if not matched_ing:
-            for ing in all_db_ingredients:
-                norm = (ing.normalized_name or ing.name or "").lower()
-                if len(norm) >= 4 and (norm in token_lower or token_lower in norm):
-                    matched_ing = ing
-                    break
-
-        if matched_ing:
+        if matched_info:
             item_info = {
-                "name": matched_ing.name,
+                "name": matched_info["name"],
                 "original_text": clean_token,
-                "category": matched_ing.category or "General",
-                "purpose": matched_ing.purpose or matched_ing.description or "Ingredient component",
-                "concern_level": matched_ing.concern_level or "safe",
-                "ins_number": matched_ing.ins_number,
-                "is_common_allergen": bool(matched_ing.is_common_allergen),
-                "source_reference": matched_ing.source_reference,
+                "category": matched_info.get("category") or "General",
+                "purpose": matched_info.get("purpose") or "Ingredient component",
+                "concern_level": matched_info.get("concern_level") or "safe",
+                "ins_number": matched_info.get("ins_number"),
+                "is_common_allergen": bool(matched_info.get("is_common_allergen")),
+                "source_reference": matched_info.get("source_reference"),
             }
             recognized.append(item_info)
 
             # Check if this ingredient raises concern
-            if matched_ing.concern_level in ("high", "moderate") or matched_ing.is_common_allergen:
+            concern_level = matched_info.get("concern_level")
+            is_common_allergen = bool(matched_info.get("is_common_allergen"))
+            if concern_level in ("high", "moderate") or is_common_allergen:
                 concerns.append({
-                    "ingredient": matched_ing.name,
-                    "concern_level": matched_ing.concern_level,
-                    "is_common_allergen": bool(matched_ing.is_common_allergen),
-                    "note": matched_ing.description or matched_ing.purpose or f"Concern level: {matched_ing.concern_level}",
+                    "ingredient": matched_info["name"],
+                    "concern_level": concern_level,
+                    "is_common_allergen": is_common_allergen,
+                    "note": matched_info.get("description") or matched_info.get("purpose") or f"Concern level: {concern_level}",
                 })
         else:
             unrecognized.append({
@@ -362,8 +464,11 @@ async def process_scan_upload(
 ) -> ProductScan:
     """
     Accepts 1 or more uploaded images belonging to one product scan.
-    Validates, preprocesses, extracts OCR text, structures the output,
-    and stores a ProductScan record.
+    Optimized for low-RAM cloud hosting:
+    - Serialized under _SCAN_SEMAPHORE to prevent concurrent memory spikes on 512MB RAM hosts
+    - CPU-bound OpenCV and OCR operations run in worker threads via asyncio.to_thread
+    - Creates lightweight thumbnails (~15-25KB) alongside original images
+    - Automatically cleans up memory and triggers garbage collection
     """
     if not files or len(files) == 0:
         raise HTTPException(
@@ -371,134 +476,176 @@ async def process_scan_upload(
             detail="At least one image file must be uploaded.",
         )
 
+    t_start = time.perf_counter()
     scan_id = str(uuid.uuid4())
     images_meta: List[Dict[str, Any]] = []
     ocr_raw_sections: List[str] = []
     confidences: List[float] = []
+    total_prep_ms = 0.0
+    total_ocr_ms = 0.0
+    total_vis_ms = 0.0
 
-    engine = get_ocr_engine()
+    async with _SCAN_SEMAPHORE:
+        engine = get_ocr_engine()
 
-    for idx, file in enumerate(files):
-        # Determine label type (e.g. "front", "ingredients", "nutrition", "allergens")
-        ltype = label_types[idx] if idx < len(label_types) else "other"
-        filename = file.filename or f"image_{idx}.jpg"
+        for idx, file in enumerate(files):
+            ltype = label_types[idx] if idx < len(label_types) else "other"
+            filename = file.filename or f"image_{idx}.jpg"
 
-        content = await file.read()
+            content = await file.read()
 
-        # 1. Validation (size, type, decodability)
-        validate_image_bytes(
-            content=content,
-            filename=filename,
-            content_type=file.content_type,
+            # 1. Validation (size, type, decodability)
+            validate_image_bytes(
+                content=content,
+                filename=filename,
+                content_type=file.content_type,
+            )
+
+            # 2. Save original image locally
+            safe_ext = os.path.splitext(filename)[1].lower() or ".jpg"
+            saved_filename = f"{scan_id}_{idx}_{ltype}{safe_ext}"
+            saved_path = os.path.join(UPLOAD_DIR, saved_filename)
+            with open(saved_path, "wb") as f:
+                f.write(content)
+
+            relative_url = f"/api/scans/images/{saved_filename}"
+
+            # 2b. Generate and save low-memory thumbnail (~15-25KB)
+            saved_thumb_filename = f"{scan_id}_{idx}_{ltype}_thumb.jpg"
+            saved_thumb_path = os.path.join(UPLOAD_DIR, saved_thumb_filename)
+            try:
+                thumb_bytes = generate_thumbnail(content)
+                with open(saved_thumb_path, "wb") as f:
+                    f.write(thumb_bytes)
+                del thumb_bytes
+                relative_thumb_url = f"/api/scans/images/{saved_thumb_filename}"
+            except Exception as e:
+                logger.warning(f"Failed to generate thumbnail: {e}")
+                relative_thumb_url = relative_url
+
+            images_meta.append({
+                "filename": filename,
+                "saved_filename": saved_filename,
+                "label_type": ltype,
+                "file_path": saved_path,
+                "url": relative_url,
+                "thumbnail_url": relative_thumb_url,
+                "size_bytes": len(content),
+            })
+
+            # 3. Preprocess image in thread (EXIF fix + downscaling + CLAHE)
+            t_p0 = time.perf_counter()
+            preprocessed_img, _ = await asyncio.to_thread(preprocess_image, content, True)
+            total_prep_ms += (time.perf_counter() - t_p0) * 1000
+
+            # 4. OCR text extraction in thread (keeps event loop responsive)
+            t_o0 = time.perf_counter()
+            ocr_res = await asyncio.to_thread(engine.extract_text, preprocessed_img)
+            total_ocr_ms += (time.perf_counter() - t_o0) * 1000
+
+            if ocr_res.raw_text:
+                header = f"--- [{ltype.upper()} LABEL] ---"
+                ocr_raw_sections.append(f"{header}\n{ocr_res.raw_text}")
+                confidences.append(ocr_res.confidence)
+
+            # Clean up intermediate numpy arrays and byte buffers
+            del preprocessed_img
+            del content
+            gc.collect()
+
+        combined_raw_text = "\n\n".join(ocr_raw_sections)
+        avg_confidence = (
+            sum(confidences) / len(confidences) if confidences else 0.0
         )
 
-        # 2. Save file locally
-        safe_ext = os.path.splitext(filename)[1].lower() or ".jpg"
-        saved_filename = f"{scan_id}_{idx}_{ltype}{safe_ext}"
-        saved_path = os.path.join(UPLOAD_DIR, saved_filename)
-        with open(saved_path, "wb") as f:
-            f.write(content)
+        # 5. Information Extraction Pipeline
+        extracted_data = extract_structured_label_info(
+            raw_ocr_text=combined_raw_text,
+            ocr_confidence=avg_confidence,
+            ocr_engine=engine.__class__.__name__.lower().replace("engine", ""),
+        )
 
-        relative_url = f"/api/scans/images/{saved_filename}"
-        images_meta.append({
-            "filename": filename,
-            "saved_filename": saved_filename,
-            "label_type": ltype,
-            "file_path": saved_path,
-            "url": relative_url,
-            "size_bytes": len(content),
-        })
+        # 5b. Multimodal Vision Fallback / Complementary check
+        # Only engage vision LLM if OCR could not detect nutrients or ingredients
+        has_ocr_nutrients = any(v is not None for v in (extracted_data.get("nutrition_facts") or {}).values())
+        has_ocr_ingredients = bool(extracted_data.get("ingredients"))
 
-        # 3. Preprocess image with OpenCV (EXIF fix + CLAHE/denoise)
-        preprocessed_img, _ = preprocess_image(content, enhance_for_ocr=True)
+        vision_extractor = MultimodalVisionExtractor()
+        if (not has_ocr_nutrients or not has_ocr_ingredients) and vision_extractor.is_available():
+            logger.info("OCR output incomplete; engaging multimodal vision extraction...")
+            t_v0 = time.perf_counter()
+            try:
+                first_img_meta = images_meta[0]
+                with open(first_img_meta["file_path"], "rb") as f:
+                    raw_bytes = f.read()
+                mime = "image/png" if first_img_meta["saved_filename"].endswith(".png") else "image/jpeg"
+                vision_result = await asyncio.to_thread(
+                    vision_extractor.extract_from_image_bytes,
+                    raw_bytes,
+                    mime,
+                )
+                del raw_bytes
+                total_vis_ms = (time.perf_counter() - t_v0) * 1000
 
-        # 4. OCR text extraction
-        ocr_res = engine.extract_text(preprocessed_img)
-        if ocr_res.raw_text:
-            header = f"--- [{ltype.upper()} LABEL] ---"
-            ocr_raw_sections.append(f"{header}\n{ocr_res.raw_text}")
-            confidences.append(ocr_res.confidence)
+                if vision_result:
+                    if not extracted_data.get("product_name") and vision_result.get("product_name"):
+                        extracted_data["product_name"] = vision_result.get("product_name")
+                    if not extracted_data.get("brand") and vision_result.get("brand"):
+                        extracted_data["brand"] = vision_result.get("brand")
+                    if (extracted_data.get("serving_size") == "100g" or not extracted_data.get("serving_size")) and vision_result.get("serving_size"):
+                        extracted_data["serving_size"] = vision_result.get("serving_size")
 
-    combined_raw_text = "\n\n".join(ocr_raw_sections)
-    avg_confidence = (
-        sum(confidences) / len(confidences) if confidences else 0.0
-    )
+                    if not has_ocr_ingredients and vision_result.get("ingredients"):
+                        extracted_data["ingredients"] = vision_result.get("ingredients")
+                        extracted_data["raw_ingredients_text"] = vision_result.get("raw_ingredients_text") or ", ".join(vision_result.get("ingredients"))
 
-    # 5. Information Extraction Pipeline
-    extracted_data = extract_structured_label_info(
-        raw_ocr_text=combined_raw_text,
-        ocr_confidence=avg_confidence,
-        ocr_engine=engine.__class__.__name__.lower().replace("engine", ""),
-    )
+                    if not has_ocr_nutrients and vision_result.get("nutrition_facts"):
+                        extracted_data["nutrition_facts"] = vision_result.get("nutrition_facts")
 
-    # 5b. Multimodal Vision Fallback / Complementary check
-    # If OCR produced no nutrition facts or no ingredients, and a vision LLM is configured
-    has_ocr_nutrients = any(v is not None for v in (extracted_data.get("nutrition_facts") or {}).values())
-    has_ocr_ingredients = bool(extracted_data.get("ingredients"))
+                    if not extracted_data.get("declared_allergens") and vision_result.get("declared_allergens"):
+                        extracted_data["declared_allergens"] = vision_result.get("declared_allergens")
+                    if not extracted_data.get("precautionary_allergens") and vision_result.get("precautionary_allergens"):
+                        extracted_data["precautionary_allergens"] = vision_result.get("precautionary_allergens")
 
-    vision_extractor = MultimodalVisionExtractor()
-    if (not has_ocr_nutrients or not has_ocr_ingredients) and vision_extractor.is_available():
-        logger.info("OCR output incomplete; engaging multimodal vision extraction...")
-        # Use first image bytes for vision analysis
-        try:
-            first_img_meta = images_meta[0]
-            with open(first_img_meta["file_path"], "rb") as f:
-                raw_bytes = f.read()
-            mime = "image/png" if first_img_meta["saved_filename"].endswith(".png") else "image/jpeg"
-            vision_result = vision_extractor.extract_from_image_bytes(raw_bytes, mime_type=mime)
-            if vision_result:
-                # Merge vision results where OCR missed values
-                if not extracted_data.get("product_name") and vision_result.get("product_name"):
-                    extracted_data["product_name"] = vision_result.get("product_name")
-                if not extracted_data.get("brand") and vision_result.get("brand"):
-                    extracted_data["brand"] = vision_result.get("brand")
-                if (extracted_data.get("serving_size") == "100g" or not extracted_data.get("serving_size")) and vision_result.get("serving_size"):
-                    extracted_data["serving_size"] = vision_result.get("serving_size")
+                    extracted_data["ocr_engine"] = f"{extracted_data['ocr_engine']}+vision"
+                    extracted_data["uncertainty_flags"].append("Augmented with multimodal vision analysis.")
+            except Exception as e:
+                logger.warning(f"Multimodal vision fallback error: {e}")
 
-                # Ingredients merge
-                if not has_ocr_ingredients and vision_result.get("ingredients"):
-                    extracted_data["ingredients"] = vision_result.get("ingredients")
-                    extracted_data["raw_ingredients_text"] = vision_result.get("raw_ingredients_text") or ", ".join(vision_result.get("ingredients"))
+        # Automated analysis: scoring, ingredient intelligence, personalized suitability
+        analysis = run_scan_analysis(
+            extracted_data=extracted_data,
+            current_user=current_user,
+            db=db,
+        )
+        extracted_data["analysis"] = analysis
 
-                # Nutrition facts merge
-                if not has_ocr_nutrients and vision_result.get("nutrition_facts"):
-                    extracted_data["nutrition_facts"] = vision_result.get("nutrition_facts")
+        # 6. Persist ProductScan record
+        scan_record = ProductScan(
+            id=scan_id,
+            user_id=current_user.id if current_user else None,
+            status="extracted",
+            images=images_meta,
+            raw_ocr_text=combined_raw_text,
+            extracted_data=extracted_data,
+            corrected_data=None,
+            product_id=None,
+        )
+        db.add(scan_record)
+        db.commit()
+        db.refresh(scan_record)
 
-                # Allergens merge
-                if not extracted_data.get("declared_allergens") and vision_result.get("declared_allergens"):
-                    extracted_data["declared_allergens"] = vision_result.get("declared_allergens")
-                if not extracted_data.get("precautionary_allergens") and vision_result.get("precautionary_allergens"):
-                    extracted_data["precautionary_allergens"] = vision_result.get("precautionary_allergens")
+        total_ms = (time.perf_counter() - t_start) * 1000
+        record_scan_metric(
+            scan_id=scan_id,
+            total_ms=total_ms,
+            ocr_ms=total_ocr_ms,
+            vision_ms=total_vis_ms,
+            prep_ms=total_prep_ms,
+        )
+        gc.collect()
 
-                extracted_data["ocr_engine"] = f"{extracted_data['ocr_engine']}+vision"
-                extracted_data["uncertainty_flags"].append("Augmented with multimodal vision analysis.")
-        except Exception as e:
-            logger.warning(f"Multimodal vision fallback error: {e}")
-
-    # Automated analysis: scoring, ingredient intelligence, personalized suitability
-    analysis = run_scan_analysis(
-        extracted_data=extracted_data,
-        current_user=current_user,
-        db=db,
-    )
-    extracted_data["analysis"] = analysis
-
-    # 6. Persist ProductScan record
-    scan_record = ProductScan(
-        id=scan_id,
-        user_id=current_user.id if current_user else None,
-        status="extracted",
-        images=images_meta,
-        raw_ocr_text=combined_raw_text,
-        extracted_data=extracted_data,
-        corrected_data=None,
-        product_id=None,
-    )
-    db.add(scan_record)
-    db.commit()
-    db.refresh(scan_record)
-
-    return scan_record
+        return scan_record
 
 
 def get_scan_by_id(
@@ -572,10 +719,12 @@ def get_user_scan_history(
 
         # Image thumbnail URL
         image_url = None
+        thumbnail_url = None
         if rec.images and len(rec.images) > 0:
             first_img = rec.images[0]
             if isinstance(first_img, dict):
                 image_url = first_img.get("url")
+                thumbnail_url = first_img.get("thumbnail_url") or image_url
 
         product_name = (
             analysis.get("product_name")
@@ -606,6 +755,7 @@ def get_user_scan_history(
             "rating_label": rating_label,
             "rating_color": rating_color,
             "image_url": image_url,
+            "thumbnail_url": thumbnail_url,
             "ocr_confidence": round(ocr_confidence, 4) if isinstance(ocr_confidence, (int, float)) else 0.0,
             "ocr_engine": ocr_engine,
             "is_scoreable": is_scoreable,

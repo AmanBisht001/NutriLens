@@ -24,6 +24,8 @@ ALLOWED_MIME_TYPES = {
 }
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MIN_IMAGE_DIMENSION = 50  # Minimum 50x50 pixels
+MAX_PROCESSING_DIMENSION = 1600  # Downsample anything larger to cap memory at ~5MB per buffer
+THUMBNAIL_MAX_DIMENSION = 320   # Fast lightweight thumbnail for dashboard preview
 
 
 class ImageValidationError(HTTPException):
@@ -122,26 +124,54 @@ def fix_orientation(pil_image: Image.Image) -> Image.Image:
     return pil_image
 
 
+def generate_thumbnail(
+    image_bytes: bytes,
+    max_dim: int = THUMBNAIL_MAX_DIMENSION,
+    quality: int = 75,
+) -> bytes:
+    """
+    Generates a fast, low-memory JPEG thumbnail (~15-25KB) from raw image bytes.
+    Saves bandwidth and client render memory on dashboard history views.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as pil_img:
+            upright = fix_orientation(pil_img)
+            if upright.mode != "RGB":
+                upright = upright.convert("RGB")
+            upright.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            out_buf = io.BytesIO()
+            upright.save(out_buf, format="JPEG", quality=quality, optimize=True)
+            return out_buf.getvalue()
+    except Exception as e:
+        logger.warning(f"Failed to generate thumbnail: {e}")
+        return image_bytes[:1024]  # Return dummy fallback if thumbnail fails
+
+
 def assess_image_quality(img_cv: np.ndarray) -> Dict[str, Any]:
     """
     Evaluates image blur via Laplacian variance and overall brightness.
-    Returns:
-        {
-            "is_blurry": bool,
-            "blur_score": float,
-            "brightness": float,
-            "is_too_dark": bool,
-            "is_too_bright": bool,
-            "quality_warning": Optional[str],
-        }
+    Uses CV_32F (half the RAM of CV_64F) and downsamples oversized images before blur check.
     """
-    if len(img_cv.shape) == 3:
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    h, w = img_cv.shape[:2]
+    # Downsample for blur calculation if over 800px to cap blur computation memory to <1MB
+    if max(h, w) > 800:
+        scale = 800.0 / max(h, w)
+        sample = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     else:
-        gray = img_cv
+        sample = img_cv
 
-    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    if len(sample.shape) == 3:
+        gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = sample
+
+    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_32F).var())
     brightness = float(np.mean(gray))
+
+    # Free sample memory if created
+    if sample is not img_cv:
+        del sample
+    del gray
 
     # A variance below 50 indicates substantial blur on typical document/label captures
     is_blurry = laplacian_var < 50.0
@@ -171,33 +201,49 @@ def preprocess_image(
     enhance_for_ocr: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Decodes image, fixes orientation, runs quality assessment, and applies OpenCV enhancement:
+    Decodes image, fixes orientation, checks resolution, runs quality assessment,
+    and applies OpenCV enhancement:
+    - Downsamples images whose dimension exceeds MAX_PROCESSING_DIMENSION (1600px)
+      to avoid memory exhaustion in OpenCV & PaddleOCR feature maps
     - Orientation correction via EXIF
     - Blur & lighting assessment
-    - Grayscale conversion
-    - Noise reduction / bilateral filtering
-    - Contrast enhancement (CLAHE)
+    - Grayscale conversion & CLAHE adaptive contrast
+    - Noise reduction via bilateral filter
     
     Returns:
         (processed_image_ndarray, metadata_dict)
     """
-    # Load using PIL first to handle EXIF rotation reliably
+    # Load using PIL first to handle EXIF rotation and downsampling reliably
     with Image.open(io.BytesIO(image_bytes)) as pil_img:
         upright_img = fix_orientation(pil_img)
-        # Convert to RGB (in case of RGBA or CMYK)
+        # Convert to RGB (in case of RGBA, P or CMYK)
         if upright_img.mode != "RGB":
             upright_img = upright_img.convert("RGB")
         
         orig_width, orig_height = upright_img.size
+
+        # Downsample oversized camera images to prevent memory spikes
+        max_side = max(orig_width, orig_height)
+        if max_side > MAX_PROCESSING_DIMENSION:
+            scale = MAX_PROCESSING_DIMENSION / float(max_side)
+            proc_w = int(orig_width * scale)
+            proc_h = int(orig_height * scale)
+            upright_img = upright_img.resize((proc_w, proc_h), Image.Resampling.LANCZOS)
+        else:
+            proc_w, proc_h = orig_width, orig_height
+
         # Convert PIL image to OpenCV BGR format
         rgb_array = np.array(upright_img)
         bgr_img = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        del rgb_array
 
     quality = assess_image_quality(bgr_img)
 
     metadata: Dict[str, Any] = {
         "original_width": orig_width,
         "original_height": orig_height,
+        "processed_width": proc_w,
+        "processed_height": proc_h,
         "quality": quality,
         "enhanced": False,
     }
@@ -208,16 +254,17 @@ def preprocess_image(
     # Enhancement for OCR:
     # 1. Convert to grayscale
     gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+    del bgr_img
 
     # 2. Adaptive contrast enhancement using CLAHE
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced_gray = clahe.apply(gray)
+    del gray
 
     # 3. Mild bilateral filter to smooth background noise while preserving sharp text edges
     denoised = cv2.bilateralFilter(enhanced_gray, d=5, sigmaColor=50, sigmaSpace=50)
+    del enhanced_gray
 
     metadata["enhanced"] = True
-    metadata["processed_width"] = orig_width
-    metadata["processed_height"] = orig_height
 
     return denoised, metadata
