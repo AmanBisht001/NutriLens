@@ -12,6 +12,8 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple
 from PIL import Image
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 EXTRACTION_PROMPT = """
@@ -109,10 +111,14 @@ class MultimodalVisionExtractor:
 
     def __init__(self):
         self.gemini_api_key = (
-            os.getenv("GEMINI_API_KEY")
+            getattr(settings, "GEMINI_API_KEY", None)
+            or os.getenv("GEMINI_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
         )
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.openai_api_key = (
+            getattr(settings, "OPENAI_API_KEY", None)
+            or os.getenv("OPENAI_API_KEY")
+        )
         self._gemini_client = None
         self._openai_client = None
 

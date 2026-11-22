@@ -85,12 +85,12 @@ def evaluate_suitability(
     safety_warnings: List[str] = []
     rules_applied: List[str] = []
 
-    # 1. Missing Ingredients Check (Requirement: Missing ingredient info must produce uncertainty warning)
+    # 1. Missing Ingredients Check (Requirement: Section independence)
     has_ingredients = bool(product_ingredients and len(product_ingredients) > 0) or bool(raw_ingredients_text and len(raw_ingredients_text.strip()) > 5)
 
-    if not has_ingredients:
+    if not has_ingredients and not nutrition_facts:
         safety_warnings.append(
-            "Missing ingredient declarations. Suitability cannot be verified without declared package ingredients."
+            "Missing ingredient and nutrition declarations. Suitability cannot be verified without package labels."
         )
         safety_warnings.append(
             "Not detecting an allergen does not prove that the product is allergen-free."
@@ -100,43 +100,63 @@ def evaluate_suitability(
             status_label=STATUS_INSUFFICIENT,
             badge_color=STATUS_COLOR_MAP[STATUS_INSUFFICIENT],
             is_suitable=False,
-            summary_narrative="Ingredient information is not available for this product. Personal dietary suitability cannot be reliably determined.",
+            summary_narrative="Neither ingredient nor nutrition information is available for this product. Personal dietary suitability cannot be reliably determined.",
             conflicts=[],
             cautions=[],
             positive_observations=[],
             safety_warnings=safety_warnings,
-            rules_applied=["Rule: Missing ingredient declaration check"],
+            rules_applied=["Rule: Missing label declaration check"],
         )
 
-    # Compile declared ingredient text tokens (excluding any trailing precautionary clauses)
-    declared_ingredient_strings: List[str] = []
-    for ing in product_ingredients:
-        name = ing.get("name") or ing.get("original_text") or ""
-        if name:
-            declared_ingredient_strings.append(name.strip())
+    pref_clean = (user_preference or "none").strip().lower()
 
-    precautionary_raw_text = ""
-    if raw_ingredients_text:
-        # Separate declared ingredients block from precautionary "may contain" clauses
-        prec_split = re.split(
-            r"(?:may\s+contain|manufactured\s+in\s+a\s+facility|made\s+on\s+equipment)",
-            raw_ingredients_text,
-            flags=re.IGNORECASE,
+    if not has_ingredients:
+        safety_warnings.append(
+            "Missing ingredient declarations. Allergen and ingredient restrictions cannot be verified without declared package ingredients."
         )
-        clean_raw_declared = prec_split[0]
-        if clean_raw_declared.strip():
-            declared_ingredient_strings.append(clean_raw_declared.strip())
-        if len(prec_split) > 1:
-            precautionary_raw_text = " ".join(prec_split[1:]).lower()
+        rules_applied.append("Rule: Missing ingredient declaration check")
+        if user_allergies or user_restrictions or pref_clean in ("vegetarian", "vegan", "jain"):
+            cautions.append(SuitabilityItem(
+                category="ingredient_check",
+                severity="caution",
+                title="Unverified Ingredients Declaration",
+                detail="Label does not declare package ingredients. Allergen and ingredient-level compliance cannot be verified.",
+                is_precautionary=True,
+            ))
+        declared_ingredient_strings = []
+        precautionary_raw_text = ""
+        declared_ingredients_corpus = ""
+        full_ingredient_corpus = ""
+    else:
+        # Compile declared ingredient text tokens (excluding any trailing precautionary clauses)
+        declared_ingredient_strings: List[str] = []
+        for ing in product_ingredients:
+            name = ing.get("name") or ing.get("original_text") or ""
+            if name:
+                declared_ingredient_strings.append(name.strip())
 
-    declared_ingredients_corpus = " ".join(declared_ingredient_strings).lower()
-    full_ingredient_corpus = f"{declared_ingredients_corpus} {precautionary_raw_text}".strip()
+        precautionary_raw_text = ""
+        if raw_ingredients_text:
+            # Separate declared ingredients block from precautionary "may contain" clauses
+            prec_split = re.split(
+                r"(?:may\s+contain|manufactured\s+in\s+a\s+facility|made\s+on\s+equipment)",
+                raw_ingredients_text,
+                flags=re.IGNORECASE,
+            )
+            clean_raw_declared = prec_split[0]
+            if clean_raw_declared.strip():
+                declared_ingredient_strings.append(clean_raw_declared.strip())
+            if len(prec_split) > 1:
+                precautionary_raw_text = " ".join(prec_split[1:]).lower()
+
+        declared_ingredients_corpus = " ".join(declared_ingredient_strings).lower()
+        full_ingredient_corpus = f"{declared_ingredients_corpus} {precautionary_raw_text}".strip()
 
     # -----------------------------------------------------------------------
-    # 2. Check User Food Allergies
+    # 2. Check User Food Allergies (requires declared ingredients)
     # Strict separation: Declared allergen = Conflict | May contain = Caution
     # -----------------------------------------------------------------------
-    if user_allergies:
+    if has_ingredients and user_allergies:
         rules_applied.append(f"Rule: Allergen cross-check against {len(user_allergies)} declared allergy profile(s)")
 
         # Compile declared vs precautionary product allergens
@@ -225,7 +245,7 @@ def evaluate_suitability(
     # -----------------------------------------------------------------------
     pref_clean = (user_preference or "none").strip().lower()
 
-    if pref_clean in ("vegetarian", "lacto-vegetarian", "lacto-ovo vegetarian"):
+    if has_ingredients and pref_clean in ("vegetarian", "lacto-vegetarian", "lacto-ovo vegetarian"):
         rules_applied.append("Rule: Vegetarian dietary pattern check")
         found_non_veg = []
         for term in NON_VEGETARIAN_TERMS:
@@ -259,7 +279,7 @@ def evaluate_suitability(
                     detail="No animal-derived or meat ingredients identified.",
                 ))
 
-    elif pref_clean == "vegan":
+    elif has_ingredients and pref_clean == "vegan":
         rules_applied.append("Rule: Vegan 100% plant-based check")
         found_non_vegan = []
         for term in NON_VEGAN_TERMS:
@@ -282,7 +302,7 @@ def evaluate_suitability(
                 detail="No animal, dairy, egg, or honey ingredients declared.",
             ))
 
-    elif pref_clean == "jain":
+    elif has_ingredients and pref_clean == "jain":
         rules_applied.append("Rule: Jain vegetarian dietary check")
         found_non_jain = []
         for term in NON_JAIN_TERMS:
@@ -308,7 +328,7 @@ def evaluate_suitability(
     # -----------------------------------------------------------------------
     # 4. Check Specific Dietary Restrictions (Gluten-Free, Halal, etc.)
     # -----------------------------------------------------------------------
-    if user_restrictions:
+    if has_ingredients and user_restrictions:
         for rest in user_restrictions:
             clean_rest = rest.strip().lower()
 
@@ -426,6 +446,13 @@ def evaluate_suitability(
         summary = (
             f"Caution advised based on available declarations. Precautionary or goal-related advisories: "
             f"{', '.join([c.title for c in cautions[:2]])}."
+        )
+    elif not has_ingredients:
+        overall_status = STATUS_INSUFFICIENT
+        is_suitable = False
+        summary = (
+            "Ingredient information is not available for this product. "
+            "Personal dietary suitability cannot be reliably determined without declared package ingredients."
         )
     else:
         overall_status = STATUS_SUITABLE

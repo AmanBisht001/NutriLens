@@ -32,25 +32,32 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database table initialization deferred (db offline or unreachable): {e}")
 
-    # Schedule OCR pre-warming as a non-blocking background task.
-    # This runs AFTER Uvicorn accepts the first health-check ping (dyno appears healthy
-    # immediately) but warms the PaddleOCR model so it is ready before the first real scan.
-    # Uses asyncio.create_task so it does NOT block startup or cause OOM during lifespan.
-    async def _warmup_ocr():
+    # Pre-warm PaddleOCR synchronously in a thread before accepting scan requests.
+    # This eliminates the 30-60 second cold-start delay that caused "Analysis is taking
+    # longer than expected" errors on the very first scan after server startup.
+    def _load_and_warm_ocr_engine():
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _load_ocr_engine)
-            logger.info("Background OCR pre-warm complete.")
+            from app.food_scanner.ocr_engine import get_ocr_engine
+            engine = get_ocr_engine()
+            if hasattr(engine, "_ensure_initialized"):
+                engine._ensure_initialized()
+                logger.info(
+                    f"OCR pre-warm complete: engine={engine.__class__.__name__} "
+                    f"version={getattr(engine, '_paddle_version', '?')} "
+                    f"ready={engine.is_initialized()}"
+                )
+            else:
+                logger.info(f"OCR pre-warm complete (fallback engine): {engine.__class__.__name__}")
         except Exception as exc:
-            logger.warning(f"Background OCR pre-warm skipped: {exc}")
+            logger.warning(f"OCR pre-warm failed (non-fatal, engine will lazy-init on first scan): {exc}")
 
-    def _load_ocr_engine():
-        from app.food_scanner.ocr_engine import get_ocr_engine
-        engine = get_ocr_engine()
-        if hasattr(engine, "_ensure_initialized"):
-            engine._ensure_initialized()
-
-    asyncio.create_task(_warmup_ocr())
+    # Run in a thread so it doesn't block the event loop, but await it so it finishes
+    # before the first request is accepted. This is the key fix for the cold-start timeout.
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _load_and_warm_ocr_engine)
+    except Exception as exc:
+        logger.warning(f"OCR pre-warm executor error (non-fatal): {exc}")
 
     yield
 

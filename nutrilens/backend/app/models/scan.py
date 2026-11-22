@@ -73,3 +73,11 @@ class ProductScan(Base):
     # Relationships
     user = relationship("User", backref="product_scans")
     product = relationship("Product", backref="product_scans")
+
+    @property
+    def analysis(self):
+        """Resolves the latest automated analysis from corrected or extracted data."""
+        target = self.corrected_data if self.corrected_data else self.extracted_data
+        if isinstance(target, dict):
+            return target.get("analysis")
+        return None

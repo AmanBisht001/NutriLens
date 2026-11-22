@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Optional
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
     SUPABASE_STORAGE_BUCKET: str = "product-labels"
+
+    # Multimodal Vision AI configuration (fallback for food scanning)
+    GEMINI_API_KEY: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
 
     # JWT Authentication settings (prepared for upcoming auth module)
     SECRET_KEY: str = "nutrilens-insecure-secret-key-change-in-production-32bytes"

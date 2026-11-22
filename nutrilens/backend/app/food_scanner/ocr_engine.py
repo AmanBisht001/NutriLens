@@ -239,11 +239,13 @@ class PaddleOCREngine(BaseOCREngine):
                 notes="Failed to decode image input.",
             )
 
-        # Ensure max dimension does not exceed 960px to maintain sub-second OCR on CPU & low RAM
+        # Ensure max dimension does not exceed 1600px.
+        # Food labels with small-text nutrition tables need higher resolution than 960px for
+        # accurate OCR — 960px was causing missed characters on dense Indian label text.
         h, w = img_cv.shape[:2]
         max_dim = max(h, w)
-        if max_dim > 960:
-            scale = 960.0 / max_dim
+        if max_dim > 1600:
+            scale = 1600.0 / max_dim
             new_w, new_h = int(w * scale), int(h * scale)
             img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
             logger.debug(f"[OCR] Resized image to {new_w}x{new_h} for OCR.")

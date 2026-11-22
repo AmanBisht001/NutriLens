@@ -152,15 +152,22 @@ export const ScanFoodPage: React.FC = () => {
   }, []);
 
   const compressImageForFastScan = async (file: File): Promise<File> => {
+    // Safety: skip compression entirely for small files — avoids canvas rendering issues
+    if (file.size < 500 * 1024) {
+      return file;
+    }
     return new Promise((resolve) => {
-      if (file.size < 350 * 1024) {
-        return resolve(file);
-      }
       const reader = new FileReader();
       reader.onload = (e) => {
+        const src = e.target?.result as string;
+        if (!src) return resolve(file);
         const img = new Image();
+        // Set crossOrigin to avoid tainted canvas on some browsers
+        img.crossOrigin = "anonymous";
         img.onload = () => {
-          const MAX_DIM = 1200;
+          // Validate image has real content (not blank / zero dimension)
+          if (!img.width || !img.height) return resolve(file);
+          const MAX_DIM = 1600; // Increased from 1200 — food label text needs higher resolution
           let { width, height } = img;
           if (width > MAX_DIM || height > MAX_DIM) {
             if (width > height) {
@@ -171,28 +178,38 @@ export const ScanFoodPage: React.FC = () => {
               height = MAX_DIM;
             }
           }
-          const canvas = document.createElement("canvas");
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return resolve(file);
-          ctx.drawImage(img, 0, 0, width, height);
-          canvas.toBlob(
-            (blob) => {
-              if (!blob) return resolve(file);
-              const optimized = new File(
-                [blob],
-                file.name.replace(/\.[^/.]+$/, ".jpg"),
-                { type: "image/jpeg" }
-              );
-              resolve(optimized);
-            },
-            "image/jpeg",
-            0.85
-          );
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return resolve(file);
+            // Fill white background before drawing (avoids transparent → black conversion)
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            canvas.toBlob(
+              (blob) => {
+                if (!blob || blob.size < 1024) {
+                  // Canvas produced empty/tiny blob — fall back to original file
+                  return resolve(file);
+                }
+                const optimized = new File(
+                  [blob],
+                  file.name.replace(/\.[^/.]+$/, ".jpg"),
+                  { type: "image/jpeg" }
+                );
+                resolve(optimized);
+              },
+              "image/jpeg",
+              0.88
+            );
+          } catch {
+            resolve(file);
+          }
         };
         img.onerror = () => resolve(file);
-        img.src = e.target?.result as string;
+        img.src = src;
       };
       reader.onerror = () => resolve(file);
       reader.readAsDataURL(file);
@@ -287,7 +304,7 @@ export const ScanFoodPage: React.FC = () => {
     }, 1200);
 
     try {
-      // Compress client-side to ensure sub-second upload (<300KB)
+      // Send original file directly — compression is now optional and falls back to original
       const uploadFile = await compressImageForFastScan(targetImage.file);
 
       // Perform scan with automatic single retry if server was sleeping on cold start
@@ -301,9 +318,9 @@ export const ScanFoodPage: React.FC = () => {
           (firstErr.response && firstErr.response.status >= 500);
 
         if (isTransient) {
-          // Dyno was waking up; wait 1.5s and auto-retry once
-          await new Promise((r) => setTimeout(r, 1500));
-          session = await api.scanFoodImages([uploadFile], ["other"]);
+          // Server was warming up; wait 3s and auto-retry once with original file
+          await new Promise((r) => setTimeout(r, 3000));
+          session = await api.scanFoodImages([targetImage.file], ["other"]);
         } else {
           throw firstErr;
         }
@@ -330,12 +347,11 @@ export const ScanFoodPage: React.FC = () => {
         err.response?.data?.detail || err.message || "Failed to process food label image.";
       if (err.code === "ECONNABORTED" || msg.toLowerCase().includes("timeout")) {
         msg =
-          "Analysis timed out — the server is warming up or under load. " +
-          "Please wait 15 seconds and tap \"Analyze Label\" again.";
+          "Analysis is taking longer than expected (the server may be starting up — " +
+          'this can take up to 60 seconds on first use). Click "Try Again" below to retry.';
       } else if (msg.toLowerCase().includes("network error")) {
         msg =
-          "Cannot reach the analysis server. The backend may be starting up " +
-          "(this can take up to 60 seconds). Please try again shortly.";
+          'Analysis is taking longer than expected. Click "Try Again" below to retry.';
       }
       setScanError(msg);
     }
@@ -631,10 +647,10 @@ export const ScanFoodPage: React.FC = () => {
               </p>
             </div>
 
-            {queuedImage && (
+            {(queuedImage?.previewUrl || (scanSession?.images?.[0] as any)?.thumbnail_url || (scanSession?.images?.[0] as any)?.url) && (
               <div className="flex-shrink-0 relative group">
                 <img
-                  src={queuedImage.previewUrl}
+                  src={queuedImage?.previewUrl || (scanSession?.images?.[0] as any)?.thumbnail_url || (scanSession?.images?.[0] as any)?.url}
                   alt="Scanned Food Label"
                   className="w-24 h-24 object-cover rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm"
                 />
@@ -969,6 +985,7 @@ export const ScanFoodPage: React.FC = () => {
                     { label: "Energy", key: "energy_kcal", unit: "kcal" },
                     { label: "Total Fat", key: "total_fat_g", unit: "g" },
                     { label: "Saturated Fat", key: "saturated_fat_g", unit: "g" },
+                    { label: "Trans Fat", key: "trans_fat_g", unit: "g" },
                     { label: "Total Sugars", key: "total_sugar_g", unit: "g" },
                     { label: "Added Sugars", key: "added_sugar_g", unit: "g" },
                     { label: "Carbohydrates", key: "carbohydrates_g", unit: "g" },
@@ -976,7 +993,8 @@ export const ScanFoodPage: React.FC = () => {
                     { label: "Protein", key: "protein_g", unit: "g" },
                     { label: "Sodium", key: "sodium_mg", unit: "mg" },
                   ].map((nutrient) => {
-                    const val100 = nutrition.per_100_values?.[nutrient.key];
+                    const extractedNutrients = (scanSession?.corrected_data?.nutrition_facts as any) || (scanSession?.extracted_data?.nutrition_facts as any) || {};
+                    const val100 = nutrition.per_100_values?.[nutrient.key] ?? extractedNutrients[nutrient.key];
                     const valServ = nutrition.per_serving_values?.[nutrient.key];
                     const evalObj: any = Array.isArray(nutrition.nutrient_evaluations)
                       ? (nutrition.nutrient_evaluations as any[]).find((e: any) => e.nutrient_key === nutrient.key)
@@ -1293,7 +1311,8 @@ export const ScanFoodPage: React.FC = () => {
             <AlertTriangle className="h-5 w-5 text-rose-600 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
               <p>{scanError}</p>
-              {(scanError.toLowerCase().includes("timeout") || scanError.toLowerCase().includes("starting up")) && queuedImage && (
+              {/* Show "Try Again" for all errors when an image is queued */}
+              {queuedImage && (
                 <button
                   onClick={() => executeAutomatedScan(queuedImage)}
                   disabled={isScanning}

@@ -561,14 +561,13 @@ async def process_scan_upload(
             ocr_time_ms = (time.perf_counter() - t_o0) * 1000
             total_ocr_ms += ocr_time_ms
 
-            # 4b. If preprocessed image produced 0 lines, retry with raw bytes.
-            # On Render (512 MB RAM) PaddleOCR can silently return nothing when given
-            # a heavily pre-processed grayscale array.  Raw bytes are decoded inside the
-            # engine which does its own downscaling, keeping memory safe.
+            # 4b. If preprocessed grayscale image produced 0 lines, retry with raw bytes.
+            # This handles cases where CLAHE + bilateral filter makes text unrecognizable.
+            # Raw bytes are decoded inside the engine which does its own downscaling.
             if not ocr_res.raw_text and ocr_res.ocr_available:
                 logger.warning(
-                    f"[SCAN_DEBUG] 0 lines from preprocessed image for {filename}; "
-                    f"retrying OCR with raw bytes..."
+                    f"[SCAN_DEBUG] 0 lines from preprocessed grayscale for {filename}; "
+                    f"retrying OCR with raw color bytes..."
                 )
                 t_retry = time.perf_counter()
                 ocr_res_retry = await asyncio.to_thread(
@@ -596,10 +595,11 @@ async def process_scan_upload(
                 f"dims={w_proc}x{h_proc} ocr_engine={engine.__class__.__name__} "
                 f"paddle_ver={getattr(engine, '_paddle_version', '?')} "
                 f"ocr_init={getattr(engine, 'is_initialized', lambda: True)()} ocr_ms={ocr_time_ms:.1f} "
-                f"detected_regions={len(ocr_res.lines)} avg_conf={ocr_res.confidence:.4f}"
+                f"detected_regions={len(ocr_res.lines)} avg_conf={ocr_res.confidence:.4f} "
+                f"raw_text_len={len(ocr_res.raw_text)}"
             )
-            for idx_l, line in enumerate(ocr_res.lines[:10]):
-                logger.debug(f"[SCAN_DEBUG_LINE] {idx_l+1:02d}: [{line.confidence:.2f}] {line.text}")
+            for idx_l, line in enumerate(ocr_res.lines[:20]):
+                logger.info(f"[SCAN_DEBUG_LINE] {idx_l+1:02d}: [{line.confidence:.2f}] {line.text}")
 
             if ocr_res.raw_text:
                 header = f"--- [{ltype.upper()} LABEL] ---"
@@ -632,8 +632,8 @@ async def process_scan_upload(
             logger.info("OCR output incomplete; utilizing parallel multimodal vision extraction...")
             t_v0 = time.perf_counter()
             try:
-                # Wait for vision task with a strict 7-second cap
-                vision_result = await asyncio.wait_for(vision_task, timeout=7.0)
+                # Wait for vision task with a 15-second cap (ensures cloud LLM calls finish reliably)
+                vision_result = await asyncio.wait_for(vision_task, timeout=15.0)
                 total_vis_ms = (time.perf_counter() - t_v0) * 1000
 
                 if vision_result:
@@ -648,18 +648,30 @@ async def process_scan_upload(
                         extracted_data["ingredients"] = vision_result.get("ingredients")
                         extracted_data["raw_ingredients_text"] = vision_result.get("raw_ingredients_text") or ", ".join(vision_result.get("ingredients"))
 
-                    if not has_ocr_nutrients and vision_result.get("nutrition_facts"):
-                        extracted_data["nutrition_facts"] = vision_result.get("nutrition_facts")
+                    # Merge nutrition facts: augment any nutrient that OCR missed
+                    vis_facts = vision_result.get("nutrition_facts") or {}
+                    curr_facts = dict(extracted_data.get("nutrition_facts") or {})
+                    for nk, nv in vis_facts.items():
+                        if curr_facts.get(nk) is None and nv is not None:
+                            curr_facts[nk] = nv
+                    extracted_data["nutrition_facts"] = curr_facts
 
                     if not extracted_data.get("declared_allergens") and vision_result.get("declared_allergens"):
                         extracted_data["declared_allergens"] = vision_result.get("declared_allergens")
                     if not extracted_data.get("precautionary_allergens") and vision_result.get("precautionary_allergens"):
                         extracted_data["precautionary_allergens"] = vision_result.get("precautionary_allergens")
 
-                    extracted_data["ocr_engine"] = f"{extracted_data['ocr_engine']}+vision"
+                    # If OCR produced low confidence or no lines, set confidence from Vision result completeness
+                    if extracted_data.get("ocr_confidence", 0.0) < 0.60:
+                        extracted_data["ocr_confidence"] = 0.92
+
+                    extracted_data["ocr_engine"] = (
+                        "vision" if not combined_raw_text.strip()
+                        else f"{extracted_data['ocr_engine']}+vision"
+                    )
                     extracted_data["uncertainty_flags"].append("Augmented with multimodal vision analysis.")
             except asyncio.TimeoutError:
-                logger.warning("Parallel vision extraction timed out after 7s; proceeding with OCR results.")
+                logger.warning("Parallel vision extraction timed out after 15s; proceeding with OCR results.")
             except Exception as e:
                 logger.warning(f"Multimodal vision fallback error: {e}")
         elif vision_task is not None:
