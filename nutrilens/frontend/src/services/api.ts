@@ -51,7 +51,7 @@ export const apiClient = axios.create({
   headers: {
     "Content-Type": "application/json",
   },
-  timeout: 10000,
+  timeout: 15000,
 });
 
 // Request interceptor: attach Authorization Bearer token if present
@@ -176,7 +176,7 @@ export const apiService = {
       headers: {
         "Content-Type": "multipart/form-data",
       },
-      timeout: 30000,
+      timeout: 120000,
     });
     return response.data;
   },

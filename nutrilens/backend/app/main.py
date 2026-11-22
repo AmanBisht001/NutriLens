@@ -30,6 +30,17 @@ async def lifespan(app: FastAPI):
         logger.info("Database tables initialized successfully.")
     except Exception as e:
         logger.warning(f"Database table initialization deferred (db offline or unreachable): {e}")
+
+    # Pre-warm the OCR engine so the first user scan does not wait for model loading
+    try:
+        import asyncio
+        from app.food_scanner.ocr_engine import get_ocr_engine
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, get_ocr_engine)
+        logger.info("OCR engine pre-warmed successfully on startup.")
+    except Exception as e:
+        logger.warning(f"OCR engine pre-warm skipped (non-fatal): {e}")
+
     yield
 
 

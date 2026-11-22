@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+﻿import React, { useState, useRef, useEffect } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -43,11 +43,11 @@ interface QueuedImage {
 }
 
 const PROCESSING_STEPS = [
-  { id: 1, label: "Uploading image..." },
-  { id: 2, label: "Reading food label..." },
-  { id: 3, label: "Extracting ingredients..." },
-  { id: 4, label: "Analyzing nutritional values..." },
-  { id: 5, label: "Checking dietary suitability..." },
+  { id: 1, label: "Connecting to server..." },
+  { id: 2, label: "Uploading image..." },
+  { id: 3, label: "Reading food label (OCR)..." },
+  { id: 4, label: "Extracting ingredients & nutrition..." },
+  { id: 5, label: "Analyzing & scoring..." },
   { id: 6, label: "Preparing your report..." },
 ];
 
@@ -224,16 +224,28 @@ export const ScanFoodPage: React.FC = () => {
     setViewMode("processing");
     setCurrentStepIndex(0);
 
-    // Multi-stage message interval for user transparency
+    // Step progression: advance one step every 4s so the UI doesn't race ahead
+    // of the actual backend work (OCR + LLM can take 30–90 seconds total).
     let step = 0;
     const interval = setInterval(() => {
       step += 1;
-      if (step < PROCESSING_STEPS.length) {
+      // Stay on the second-to-last step until the response arrives
+      if (step < PROCESSING_STEPS.length - 1) {
         setCurrentStepIndex(step);
       }
-    }, 600);
+    }, 4000);
 
     try {
+      // 1. Ping the health endpoint first so Render's free-tier dyno wakes up
+      //    before we send the heavyweight scan payload. Ignore errors – this is
+      //    best-effort only (the scan call itself will retry on timeout).
+      try {
+        await api.checkHealth();
+      } catch {
+        // Backend may still be waking; proceed anyway
+      }
+
+      // 2. Perform the actual scan (120-second timeout set in api.ts)
       const session = await api.scanFoodImages([targetImage.file], ["other"]);
       clearInterval(interval);
       setCurrentStepIndex(PROCESSING_STEPS.length - 1);
@@ -250,8 +262,14 @@ export const ScanFoodPage: React.FC = () => {
     } catch (err: any) {
       clearInterval(interval);
       setViewMode("scan");
-      const msg =
+      let msg: string =
         err.response?.data?.detail || err.message || "Failed to process food label image.";
+      // Provide a friendlier message for timeout errors
+      if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("network")) {
+        msg =
+          "Analysis is taking longer than expected (the server may be starting up). " +
+          "Please wait a few seconds and try again.";
+      }
       setScanError(msg);
     }
   };
@@ -439,8 +457,11 @@ export const ScanFoodPage: React.FC = () => {
             })}
           </div>
 
-          <div className="mt-8 text-xs text-slate-400 dark:text-slate-500">
-            Automated OCR & Intelligence Engine • No barcode or manual identification required
+          <div className="mt-8 text-xs text-slate-400 dark:text-slate-500 space-y-1">
+            <p>Automated OCR &amp; Intelligence Engine • No barcode or manual identification required</p>
+            <p className="text-amber-500 dark:text-amber-400 font-medium">
+              ⏱ First scan may take up to 90 seconds while the server wakes up. Please wait.
+            </p>
           </div>
         </Card>
       </div>
