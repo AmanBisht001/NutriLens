@@ -30,6 +30,12 @@ from app.food_scanner.service import (
     confirm_scan_and_create_product,
     UPLOAD_DIR,
 )
+from app.food_scanner.ocr_engine import get_ocr_engine
+from app.food_scanner.preprocessor import preprocess_image
+from app.food_scanner.extractor import extract_structured_label_info
+import cv2
+import time
+import numpy as np
 
 router = APIRouter()
 
@@ -83,6 +89,95 @@ async def scan_food_product(
         db=db,
     )
     return scan_record
+
+
+@router.post(
+    "/scans/debug-ocr",
+    summary="Development diagnostic endpoint to inspect raw OCR output directly",
+)
+async def debug_ocr_endpoint(
+    file: UploadFile = File(..., description="Food label image to inspect"),
+):
+    """
+    Accepts a food-label image and returns exact raw OCR results,
+    detected text regions, bounding boxes, confidences, and parser output.
+    """
+    t0 = time.perf_counter()
+    errors = []
+    content = await file.read()
+    
+    # Check decoding
+    image_decoded = False
+    img_shape = None
+    try:
+        nparr = np.frombuffer(content, np.uint8)
+        img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_cv is not None:
+            image_decoded = True
+            img_shape = list(img_cv.shape)
+        else:
+            errors.append("cv2.imdecode returned None.")
+    except Exception as e:
+        errors.append(f"Image decoding failed: {e}")
+
+    # Inspect OCR engine
+    engine = get_ocr_engine()
+    engine_name = engine.__class__.__name__
+
+    # Installed PaddleOCR version
+    paddle_version = "unknown"
+    try:
+        import paddleocr
+        paddle_version = getattr(paddleocr, "__version__", "unknown")
+    except Exception as e:
+        paddle_version = f"not installed ({e})"
+
+    recognized_text = []
+    lines_info = []
+    confidences = []
+
+    if image_decoded:
+        try:
+            ocr_res = engine.extract_text(img_cv)
+            for line in ocr_res.lines:
+                recognized_text.append(line.text)
+                confidences.append(line.confidence)
+                lines_info.append({
+                    "text": line.text,
+                    "confidence": round(line.confidence, 4),
+                    "box": line.box,
+                })
+        except Exception as e:
+            errors.append(f"OCR execution failed: {e}")
+
+    avg_conf = (sum(confidences) / len(confidences)) if confidences else 0.0
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    # Also run information extractor to verify end-to-end parsed result
+    raw_text = "\n".join(recognized_text)
+    extracted_data = extract_structured_label_info(
+        raw_ocr_text=raw_text,
+        ocr_confidence=avg_conf,
+        ocr_engine=engine_name.lower().replace("engine", ""),
+    )
+
+    return {
+        "image_decoded": image_decoded,
+        "image_shape": img_shape,
+        "file_size_bytes": len(content),
+        "ocr_engine": engine_name,
+        "ocr_version": paddle_version,
+        "detected_text_regions": len(recognized_text),
+        "average_confidence": round(avg_conf, 4),
+        "processing_time_ms": round(elapsed_ms, 2),
+        "recognized_text": recognized_text,
+        "lines": lines_info,
+        "raw_text": raw_text,
+        "extracted_nutrition": extracted_data.get("nutrition_facts"),
+        "extracted_ingredients": extracted_data.get("ingredients"),
+        "product_name": extracted_data.get("product_name"),
+        "errors": errors,
+    }
 
 
 @router.get(

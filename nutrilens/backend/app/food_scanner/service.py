@@ -549,13 +549,25 @@ async def process_scan_upload(
 
             # 3. Preprocess image in thread (EXIF fix + downscaling + CLAHE)
             t_p0 = time.perf_counter()
-            preprocessed_img, _ = await asyncio.to_thread(preprocess_image, content, True)
+            preprocessed_img, prep_meta = await asyncio.to_thread(preprocess_image, content, True)
             total_prep_ms += (time.perf_counter() - t_p0) * 1000
 
             # 4. OCR text extraction in thread (keeps event loop responsive)
             t_o0 = time.perf_counter()
             ocr_res = await asyncio.to_thread(engine.extract_text, preprocessed_img)
-            total_ocr_ms += (time.perf_counter() - t_o0) * 1000
+            ocr_time_ms = (time.perf_counter() - t_o0) * 1000
+            total_ocr_ms += ocr_time_ms
+
+            # Log comprehensive scan diagnostic information for every image
+            h_proc, w_proc = preprocessed_img.shape[:2] if preprocessed_img is not None else (0, 0)
+            logger.info(
+                f"[SCAN_DEBUG] scan_id={scan_id} file={filename} size_bytes={len(content)} "
+                f"dims={w_proc}x{h_proc} ocr_engine={engine.__class__.__name__} "
+                f"ocr_init={getattr(engine, 'is_initialized', lambda: True)()} ocr_ms={ocr_time_ms:.1f} "
+                f"detected_regions={len(ocr_res.lines)} avg_conf={ocr_res.confidence:.4f}"
+            )
+            for idx_l, line in enumerate(ocr_res.lines[:10]):
+                logger.debug(f"[SCAN_DEBUG_LINE] {idx_l+1:02d}: [{line.confidence:.2f}] {line.text}")
 
             if ocr_res.raw_text:
                 header = f"--- [{ltype.upper()} LABEL] ---"
@@ -630,6 +642,15 @@ async def process_scan_upload(
             db=db,
         )
         extracted_data["analysis"] = analysis
+
+        parsed_nutrients_count = sum(1 for v in (extracted_data.get("nutrition_facts") or {}).values() if v is not None)
+        parsed_ingredients_count = len(extracted_data.get("ingredients") or [])
+        score_val = analysis.get("nutrition_analysis", {}).get("score")
+        logger.info(
+            f"[SCAN_RESULT] scan_id={scan_id} product='{extracted_data.get('product_name')}' "
+            f"nutrients_detected={parsed_nutrients_count}/10 ingredients_detected={parsed_ingredients_count} "
+            f"score={score_val} ocr_confidence={extracted_data.get('ocr_confidence', 0):.4f}"
+        )
 
         # 6. Persist ProductScan record
         scan_record = ProductScan(

@@ -167,11 +167,21 @@ def split_ingredients_list(raw_ing_text: str) -> List[str]:
 def extract_ingredients(text: str) -> Tuple[Optional[str], List[str]]:
     """
     Detects ingredients section and returns (raw_ingredients_text, list_of_individual_ingredients).
+    Handles Indian packaging declarations, parenthesis groups, and additive codes.
     """
-    # Regex to find starting tag: "INGREDIENTS:", "INGREDIENTS -", or standalone "INGREDIENTS" line
-    start_match = re.search(r"\bINGREDIENTS?\s*[:\-\n]\s*", text, re.IGNORECASE)
+    # Regex to find starting tag: "INGREDIENTS:", "INGREDIENTS -", "LIST OF INGREDIENTS:", etc.
+    start_match = re.search(
+        r"\b(?:list\s+of\s+ingredients?|ingredients?(?:\s*\(as\s+consumed\))?|ingred[a-z]*)\s*[:\-\.\n\(]\s*",
+        text,
+        re.IGNORECASE,
+    )
     if not start_match:
-        # Check alternative: text starting with "Contains: ..." where no other ingredients block exists
+        # Check alternative: text starting with "Contains: ..." where ingredients are listed directly
+        contains_match = re.search(r"\b(?:contains)\s*[:\-\n]\s*([a-zA-Z0-9\s,\(\)%\-\._]{15,})", text, re.IGNORECASE)
+        if contains_match and "," in contains_match.group(1):
+            raw_section = contains_match.group(1).split("\n\n")[0].strip()
+            items = split_ingredients_list(raw_section)
+            return (raw_section if items else None, items)
         return None, []
 
     start_idx = start_match.end()
@@ -258,39 +268,70 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
             text,
         )
 
+    # Unit-based fallback for Energy: in food labels, 'kcal' is exclusively used for Energy
+    if facts["energy_kcal"] is None:
+        kcal_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*kcal\b", text, re.IGNORECASE)
+        if kcal_match:
+            try:
+                facts["energy_kcal"] = float(kcal_match.group(1).replace(",", "."))
+            except ValueError:
+                pass
+
     # 2. Total Fat (find "Total Fat" or standalone "Fat", avoiding Saturated or Trans)
     fat_match = re.search(
-        r"(?:total\s+fat|(?<!saturated\s)(?<!trans\s)\bfat|crude\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+        r"(?:total\s+fat|(?<!saturated\s)(?<!ated\s)(?<!trans\s)(?<!ans\s)\bfat|crude\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
         re.IGNORECASE,
     )
     if fat_match:
         try:
-            facts["total_fat_g"] = float(fat_match.group(1).replace(",", "."))
+            val = float(fat_match.group(1).replace(",", "."))
+            facts["total_fat_g"] = val
         except ValueError:
             pass
 
-    # 3. Saturated Fat / Saturates / 'of which saturates'
+    # 3. Saturated Fat / Saturates / 'of which saturates' / 'ated Fat'
     facts["saturated_fat_g"] = _extract_number(
-        r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+        r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|[a-z]*ated\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
-    # 4. Trans Fat
+    # 4. Trans Fat / 'ans Fat'
     facts["trans_fat_g"] = _extract_number(
-        r"(?:trans\s+fat|trans\s+fatty\s+acids)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+        r"(?:trans\s+fat|trans\s+fatty\s+acids|[a-z]*ans\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
+    if facts["trans_fat_g"] is None and facts["saturated_fat_g"] is not None:
+        post_sat_trans = re.search(r"(?:ated|saturated)\s+fat[\s\S]*?\bFat[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b)", text, re.IGNORECASE)
+        if post_sat_trans:
+            try:
+                facts["trans_fat_g"] = float(post_sat_trans.group(1).replace(",", "."))
+            except ValueError:
+                pass
 
-    # 5. Carbohydrates
+    # Re-validate Total Fat does not duplicate Saturated or Trans Fat
+    if facts["total_fat_g"] is not None:
+        if facts["total_fat_g"] == facts["saturated_fat_g"] or facts["total_fat_g"] == facts["trans_fat_g"]:
+            facts["total_fat_g"] = None
+
+    # Positional check: Total Fat is usually the number preceding Saturated Fat
+    if facts["total_fat_g"] is None and facts["saturated_fat_g"] is not None:
+        pre_sat_fat = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*g\b\s*(?:[0-9]+%\s*)?(?:ated|saturated)\s+fat", text, re.IGNORECASE)
+        if pre_sat_fat:
+            try:
+                facts["total_fat_g"] = float(pre_sat_fat.group(1).replace(",", "."))
+            except ValueError:
+                pass
+
+    # 5. Carbohydrates (handles 'carbohydrates', 'carbs', and truncated 'ydrate')
     facts["carbohydrates_g"] = _extract_number(
-        r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+        r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 6. Total Sugars / 'of which sugars'
     sug_match = re.search(
-        r"(?:total\s+sugars?|of\s+which\s+sugars?|(?<!added\s)\bsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+        r"(?:total\s+sugars?|of\s+which\s+sugars?|(?<!added\s)(?<!jed\s)(?<![a-z]ed\s)\bsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
         re.IGNORECASE,
     )
@@ -300,9 +341,9 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
         except ValueError:
             pass
 
-    # 7. Added Sugars
+    # 7. Added Sugars (handles 'added sugars' and OCR misread like 'JedSugars')
     facts["added_sugar_g"] = _extract_number(
-        r"(?:added\s+sugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+        r"(?:added\s*sugars?|[a-z]*ed\s*sugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
@@ -317,31 +358,47 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
         r"(?:protein|crude\s+protein)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
+    # Positional check: in standard Indian nutrition tables, Protein is the row between Energy (kcal) and Carbohydrate
+    if facts["protein_g"] is None:
+        table_protein = re.search(r"kcal[\s\S]*?\b([0-9]+(?:\.[0-9]+)?)\s*g\b[\s\S]*?[a-z]*(?:hydrate|ydrate)", text, re.IGNORECASE)
+        if table_protein:
+            try:
+                facts["protein_g"] = float(table_protein.group(1).replace(",", "."))
+            except ValueError:
+                pass
 
     # 10. Sodium (mg or g) or Salt (g converted: 1g salt ≈ 400mg sodium)
     sodium_val = _extract_number(
-        r"(?:sodium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
+        r"(?:sodium|[a-z]*dium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
         text,
     )
     if sodium_val is not None:
         # Check if unit was grams
-        m_g = re.search(r"(?:sodium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*g\b", text, re.IGNORECASE)
+        m_g = re.search(r"(?:sodium|[a-z]*dium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*g\b", text, re.IGNORECASE)
         if m_g:
             sodium_val = sodium_val * 1000.0  # Convert grams to mg
         facts["sodium_mg"] = sodium_val
     else:
+        # Check for standalone mg in table
+        mg_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*mg\b", text, re.IGNORECASE)
+        if mg_match:
+            try:
+                facts["sodium_mg"] = float(mg_match.group(1).replace(",", "."))
+            except ValueError:
+                pass
         # Check for Salt declaration (common on Indian and UK packaged goods)
-        salt_val = _extract_number(
-            r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|mg\b)?",
-            text,
-        )
-        if salt_val is not None:
-            # If declared in grams (standard on food labels), convert to sodium in mg: 1g salt = 400mg sodium
-            m_salt_mg = re.search(r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*mg\b", text, re.IGNORECASE)
-            if m_salt_mg:
-                facts["sodium_mg"] = round(salt_val * 0.4, 2)
-            else:
-                facts["sodium_mg"] = round(salt_val * 400.0, 2)
+        if facts["sodium_mg"] is None:
+            salt_val = _extract_number(
+                r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|mg\b)?",
+                text,
+            )
+            if salt_val is not None:
+                # If declared in grams (standard on food labels), convert to sodium in mg: 1g salt = 400mg sodium
+                m_salt_mg = re.search(r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*mg\b", text, re.IGNORECASE)
+                if m_salt_mg:
+                    facts["sodium_mg"] = round(salt_val * 0.4, 2)
+                else:
+                    facts["sodium_mg"] = round(salt_val * 400.0, 2)
 
     return facts
 

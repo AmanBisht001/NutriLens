@@ -31,17 +31,6 @@ class OCRLine:
     box: Optional[List[List[int]]] = None
 
 
-import os
-import gc
-
-# Configure lightweight single-threaded CPU execution to reduce memory overhead on constrained cloud hosts
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-
-
 @dataclass
 class OCRResult:
     raw_text: str
@@ -71,6 +60,10 @@ class OCRResult:
 
 class BaseOCREngine(ABC):
     """Abstract OCR engine interface."""
+
+    def is_initialized(self) -> bool:
+        """Returns True if the engine model is loaded and ready."""
+        return True
 
     @abstractmethod
     def extract_text(self, image: Union[np.ndarray, bytes]) -> OCRResult:
@@ -214,6 +207,9 @@ class FallbackOCREngine(BaseOCREngine):
     def __init__(self, reason: str = "PaddleOCR engine is not configured in this environment."):
         self.reason = reason
 
+    def is_initialized(self) -> bool:
+        return False
+
     def extract_text(self, image: Union[np.ndarray, bytes]) -> OCRResult:
         return OCRResult(
             raw_text="",
@@ -234,6 +230,9 @@ class MockOCREngine(BaseOCREngine):
     def __init__(self, predefined_text: Optional[str] = None, confidence: float = 0.95):
         self.predefined_text = predefined_text
         self.confidence = confidence
+
+    def is_initialized(self) -> bool:
+        return True
 
     def set_text(self, text: str, confidence: float = 0.95):
         self.predefined_text = text
