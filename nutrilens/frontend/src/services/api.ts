@@ -176,7 +176,7 @@ export const apiService = {
       headers: {
         "Content-Type": undefined,
       },
-      timeout: 60000,
+      timeout: 120000, // 2 minutes: covers cold-start (60s) + OCR model load (30s) + inference (30s)
     });
     return response.data;
   },

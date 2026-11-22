@@ -4,7 +4,7 @@ services:
     name: nutrilens-backend
     runtime: python
     rootDir: nutrilens/backend
-    buildCommand: "pip install --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/ -r requirements.txt && python -c \"from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=False, lang='en', show_log=False)\" && alembic upgrade head && python app/seed.py"
+    buildCommand: "pip install --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/ -r requirements.txt && python -c \"from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='en', use_doc_orientation_classify=False, show_log=False); print('PaddleOCR 3.x ready')\" && alembic upgrade head && python app/seed.py"
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     plan: free
     region: oregon

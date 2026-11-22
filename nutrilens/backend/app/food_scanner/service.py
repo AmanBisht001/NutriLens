@@ -547,6 +547,9 @@ async def process_scan_upload(
                     )
                 )
 
+            # Preserve a reference to raw bytes for OCR retry (before del content below)
+            _raw_content_for_retry = content
+
             # 3. Preprocess image in thread (EXIF fix + downscaling + CLAHE)
             t_p0 = time.perf_counter()
             preprocessed_img, prep_meta = await asyncio.to_thread(preprocess_image, content, True)
@@ -558,11 +561,40 @@ async def process_scan_upload(
             ocr_time_ms = (time.perf_counter() - t_o0) * 1000
             total_ocr_ms += ocr_time_ms
 
+            # 4b. If preprocessed image produced 0 lines, retry with raw bytes.
+            # On Render (512 MB RAM) PaddleOCR can silently return nothing when given
+            # a heavily pre-processed grayscale array.  Raw bytes are decoded inside the
+            # engine which does its own downscaling, keeping memory safe.
+            if not ocr_res.raw_text and ocr_res.ocr_available:
+                logger.warning(
+                    f"[SCAN_DEBUG] 0 lines from preprocessed image for {filename}; "
+                    f"retrying OCR with raw bytes..."
+                )
+                t_retry = time.perf_counter()
+                ocr_res_retry = await asyncio.to_thread(
+                    engine.extract_text, _raw_content_for_retry
+                )
+                retry_ms = (time.perf_counter() - t_retry) * 1000
+                total_ocr_ms += retry_ms
+                if ocr_res_retry.raw_text:
+                    logger.info(
+                        f"[SCAN_DEBUG] Raw-bytes retry succeeded: "
+                        f"{len(ocr_res_retry.lines)} lines in {retry_ms:.0f}ms"
+                    )
+                    ocr_res = ocr_res_retry
+                else:
+                    logger.warning(
+                        f"[SCAN_DEBUG] Raw-bytes retry also returned 0 lines after {retry_ms:.0f}ms"
+                    )
+
+            del _raw_content_for_retry
+
             # Log comprehensive scan diagnostic information for every image
             h_proc, w_proc = preprocessed_img.shape[:2] if preprocessed_img is not None else (0, 0)
             logger.info(
                 f"[SCAN_DEBUG] scan_id={scan_id} file={filename} size_bytes={len(content)} "
                 f"dims={w_proc}x{h_proc} ocr_engine={engine.__class__.__name__} "
+                f"paddle_ver={getattr(engine, '_paddle_version', '?')} "
                 f"ocr_init={getattr(engine, 'is_initialized', lambda: True)()} ocr_ms={ocr_time_ms:.1f} "
                 f"detected_regions={len(ocr_res.lines)} avg_conf={ocr_res.confidence:.4f}"
             )

@@ -329,9 +329,13 @@ export const ScanFoodPage: React.FC = () => {
       let msg: string =
         err.response?.data?.detail || err.message || "Failed to process food label image.";
       if (err.code === "ECONNABORTED" || msg.toLowerCase().includes("timeout")) {
-        msg = "Analysis request timed out. Please check your internet connection and try again.";
+        msg =
+          "Analysis timed out — the server is warming up or under load. " +
+          "Please wait 15 seconds and tap \"Analyze Label\" again.";
       } else if (msg.toLowerCase().includes("network error")) {
-        msg = "Unable to reach the analysis server. The backend may be deploying or starting up — please try again in a few seconds.";
+        msg =
+          "Cannot reach the analysis server. The backend may be starting up " +
+          "(this can take up to 60 seconds). Please try again shortly.";
       }
       setScanError(msg);
     }
