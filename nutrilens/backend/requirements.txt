@@ -16,16 +16,13 @@ pyjwt>=2.8.0,<3.0.0
 bcrypt>=4.0.0,<6.0.0
 email-validator>=2.0.0,<3.0.0
 # Image processing (food scanner pipeline)
-numpy>=1.26.0,<3.0.0
+numpy>=1.26.0,<2.0.0
 opencv-python-headless>=4.10.0,<5.0.0
 Pillow>=10.4.0,<12.0.0
-# PaddleOCR 3.x + PaddlePaddle 3.0.0 (CPU-only)
-# paddlepaddle 3.0.0 is only available via the PaddlePaddle CN stable index (not PyPI).
-# paddleocr 2.x required paddlepaddle==2.6.2 which is NOT on the CN index for cp311/linux.
-# paddleocr 3.0.3 is fully compatible with paddlepaddle 3.0.0 and uses the new .predict() API.
-# IMPORTANT: --extra-index-url at the top of this file supplies the CN index during pip install.
-paddlepaddle==3.0.0; python_version >= '3.8' and python_version < '3.13'
-paddleocr==3.0.3; python_version >= '3.8' and python_version < '3.13'
+# PaddleOCR + PaddlePaddle (CPU-only, installed from PaddlePaddle stable index)
+# Requires Python 3.11 and numpy < 2.0
+paddlepaddle==2.6.2; python_version >= '3.8' and python_version < '3.13'
+paddleocr==2.10.0; python_version >= '3.8' and python_version < '3.13'
 google-genai>=3.6.0
 openai>=3.50.0
 rapidfuzz>=3.10.0
