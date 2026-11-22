@@ -80,12 +80,12 @@ def _clean_json_response(raw_text: str) -> Optional[Dict[str, Any]]:
 
 def prepare_vision_image_bytes(
     image_bytes: bytes,
-    max_dim: int = 1280,
-    quality: int = 80,
+    max_dim: int = 1024,
+    quality: int = 78,
 ) -> Tuple[bytes, str]:
     """
-    Downsamples and compresses image bytes to a lightweight JPEG (~150-250KB)
-    specifically for Vision LLM upload. Avoids large memory allocations and slow network uploads.
+    Downsamples and compresses image bytes to a lightweight JPEG (~80-150KB)
+    specifically for Vision LLM upload. Ensures lightning-fast upload & API response.
     """
     try:
         with Image.open(io.BytesIO(image_bytes)) as pil_img:
@@ -161,22 +161,37 @@ class MultimodalVisionExtractor:
         if self._gemini_client is None:
             self._gemini_client = genai.Client(api_key=self.gemini_api_key)
 
-        response = self._gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(
-                    data=image_bytes,
-                    mime_type=mime_type,
-                ),
-                EXTRACTION_PROMPT,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-        )
-        if response and response.text:
-            return _clean_json_response(response.text)
+        # Try fast modern production Gemini flash models with fallbacks
+        candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"]
+        last_exc = None
+
+        for model_name in candidate_models:
+            try:
+                response = self._gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type=mime_type,
+                        ),
+                        EXTRACTION_PROMPT,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
+                )
+                if response and response.text:
+                    parsed = _clean_json_response(response.text)
+                    if parsed:
+                        return parsed
+            except Exception as e:
+                last_exc = e
+                logger.info(f"Gemini model {model_name} attempted: {e}")
+                continue
+
+        if last_exc:
+            logger.warning(f"All Gemini models exhausted: {last_exc}")
         return None
 
     def _extract_with_openai(
@@ -187,7 +202,7 @@ class MultimodalVisionExtractor:
         from openai import OpenAI
 
         if self._openai_client is None:
-            self._openai_client = OpenAI(api_key=self.openai_api_key, timeout=15.0)
+            self._openai_client = OpenAI(api_key=self.openai_api_key, timeout=8.0)
 
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:{mime_type};base64,{b64_image}"

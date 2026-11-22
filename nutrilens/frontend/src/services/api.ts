@@ -176,7 +176,7 @@ export const apiService = {
       headers: {
         "Content-Type": "multipart/form-data",
       },
-      timeout: 180000,
+      timeout: 60000,
     });
     return response.data;
   },

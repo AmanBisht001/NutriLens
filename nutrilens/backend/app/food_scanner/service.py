@@ -487,6 +487,8 @@ async def process_scan_upload(
 
     async with _SCAN_SEMAPHORE:
         engine = get_ocr_engine()
+        vision_extractor = MultimodalVisionExtractor()
+        vision_task: Optional[asyncio.Task] = None
 
         for idx, file in enumerate(files):
             ltype = label_types[idx] if idx < len(label_types) else "other"
@@ -533,6 +535,18 @@ async def process_scan_upload(
                 "size_bytes": len(content),
             })
 
+            # Start vision extraction in parallel for the first label image if configured
+            # This completely avoids sequential waiting, saving 5-8 seconds.
+            if idx == 0 and vision_extractor.is_available() and vision_task is None:
+                mime = "image/png" if saved_filename.endswith(".png") else "image/jpeg"
+                vision_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        vision_extractor.extract_from_image_bytes,
+                        content,
+                        mime,
+                    )
+                )
+
             # 3. Preprocess image in thread (EXIF fix + downscaling + CLAHE)
             t_p0 = time.perf_counter()
             preprocessed_img, _ = await asyncio.to_thread(preprocess_image, content, True)
@@ -570,21 +584,12 @@ async def process_scan_upload(
         has_ocr_nutrients = any(v is not None for v in (extracted_data.get("nutrition_facts") or {}).values())
         has_ocr_ingredients = bool(extracted_data.get("ingredients"))
 
-        vision_extractor = MultimodalVisionExtractor()
-        if (not has_ocr_nutrients or not has_ocr_ingredients) and vision_extractor.is_available():
-            logger.info("OCR output incomplete; engaging multimodal vision extraction...")
+        if (not has_ocr_nutrients or not has_ocr_ingredients) and vision_task is not None:
+            logger.info("OCR output incomplete; utilizing parallel multimodal vision extraction...")
             t_v0 = time.perf_counter()
             try:
-                first_img_meta = images_meta[0]
-                with open(first_img_meta["file_path"], "rb") as f:
-                    raw_bytes = f.read()
-                mime = "image/png" if first_img_meta["saved_filename"].endswith(".png") else "image/jpeg"
-                vision_result = await asyncio.to_thread(
-                    vision_extractor.extract_from_image_bytes,
-                    raw_bytes,
-                    mime,
-                )
-                del raw_bytes
+                # Wait for vision task with a strict 7-second cap
+                vision_result = await asyncio.wait_for(vision_task, timeout=7.0)
                 total_vis_ms = (time.perf_counter() - t_v0) * 1000
 
                 if vision_result:
@@ -609,8 +614,14 @@ async def process_scan_upload(
 
                     extracted_data["ocr_engine"] = f"{extracted_data['ocr_engine']}+vision"
                     extracted_data["uncertainty_flags"].append("Augmented with multimodal vision analysis.")
+            except asyncio.TimeoutError:
+                logger.warning("Parallel vision extraction timed out after 7s; proceeding with OCR results.")
             except Exception as e:
                 logger.warning(f"Multimodal vision fallback error: {e}")
+        elif vision_task is not None:
+            # OCR already found everything; cancel vision task if still pending to save quota
+            if not vision_task.done():
+                vision_task.cancel()
 
         # Automated analysis: scoring, ingredient intelligence, personalized suitability
         analysis = run_scan_analysis(

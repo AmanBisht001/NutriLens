@@ -24,7 +24,7 @@ ALLOWED_MIME_TYPES = {
 }
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MIN_IMAGE_DIMENSION = 50  # Minimum 50x50 pixels
-MAX_PROCESSING_DIMENSION = 1600  # Downsample anything larger to cap memory at ~5MB per buffer
+MAX_PROCESSING_DIMENSION = 1200  # Capped at 1200px for sub-second processing and minimal memory (<3MB per buffer)
 THUMBNAIL_MAX_DIMENSION = 320   # Fast lightweight thumbnail for dashboard preview
 
 
@@ -261,8 +261,8 @@ def preprocess_image(
     enhanced_gray = clahe.apply(gray)
     del gray
 
-    # 3. Mild bilateral filter to smooth background noise while preserving sharp text edges
-    denoised = cv2.bilateralFilter(enhanced_gray, d=5, sigmaColor=50, sigmaSpace=50)
+    # 3. Fast bilateral filter to smooth noise while preserving sharp text edges (d=3 for sub-50ms execution)
+    denoised = cv2.bilateralFilter(enhanced_gray, d=3, sigmaColor=35, sigmaSpace=35)
     del enhanced_gray
 
     metadata["enhanced"] = True

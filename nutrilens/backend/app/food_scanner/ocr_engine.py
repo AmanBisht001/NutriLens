@@ -140,11 +140,11 @@ class PaddleOCREngine(BaseOCREngine):
                 notes="Failed to decode image input.",
             )
 
-        # Ensure max dimension does not exceed 1600px to avoid memory spikes in feature maps
+        # Ensure max dimension does not exceed 1200px to maintain sub-second OCR speed on CPU
         h, w = img_cv.shape[:2]
         max_dim = max(h, w)
-        if max_dim > 1600:
-            scale = 1600.0 / max_dim
+        if max_dim > 1200:
+            scale = 1200.0 / max_dim
             new_w, new_h = int(w * scale), int(h * scale)
             img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
 

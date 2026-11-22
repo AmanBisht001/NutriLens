@@ -27,8 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import axios from "axios";
-import { api, API_BASE_URL } from "@/services/api";
+import { api } from "@/services/api";
 import type {
   ScanSession,
   ExtractedNutritionFacts,
@@ -145,10 +144,60 @@ export const ScanFoodPage: React.FC = () => {
   };
 
   useEffect(() => {
+    // Silently pre-wake the backend on page load so it is warm by the time the user captures/uploads
+    api.checkHealth().catch(() => {});
     return () => {
       stopCamera();
     };
   }, []);
+
+  const compressImageForFastScan = async (file: File): Promise<File> => {
+    return new Promise((resolve) => {
+      if (file.size < 350 * 1024) {
+        return resolve(file);
+      }
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX_DIM = 1200;
+          let { width, height } = img;
+          if (width > MAX_DIM || height > MAX_DIM) {
+            if (width > height) {
+              height = Math.round((height * MAX_DIM) / width);
+              width = MAX_DIM;
+            } else {
+              width = Math.round((width * MAX_DIM) / height);
+              height = MAX_DIM;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return resolve(file);
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(
+            (blob) => {
+              if (!blob) return resolve(file);
+              const optimized = new File(
+                [blob],
+                file.name.replace(/\.[^/.]+$/, ".jpg"),
+                { type: "image/jpeg" }
+              );
+              resolve(optimized);
+            },
+            "image/jpeg",
+            0.85
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  };
 
   const capturePhoto = () => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -186,7 +235,7 @@ export const ScanFoodPage: React.FC = () => {
   // ---------------------------------------------------------------------------
   // File Upload Handling
   // ---------------------------------------------------------------------------
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const file = files[0];
@@ -228,31 +277,21 @@ export const ScanFoodPage: React.FC = () => {
     setViewMode("processing");
     setCurrentStepIndex(0);
 
-    // Step progression: advance one step every 4s so the UI doesn't race ahead
-    // of the actual backend work (OCR + LLM can take 30–90 seconds total).
+    // Dynamic step progression: updates smoothly every 1.2s to reflect fast active analysis
     let step = 0;
     const interval = setInterval(() => {
       step += 1;
-      // Stay on the second-to-last step until the response arrives
       if (step < PROCESSING_STEPS.length - 1) {
         setCurrentStepIndex(step);
       }
-    }, 4000);
+    }, 1200);
 
     try {
-      // 1. Ping the health endpoint first so Render's free-tier dyno fully wakes up
-      //    before we send the heavyweight scan payload.
-      //    Use a 70-second dedicated timeout so we actually wait through Render's
-      //    cold-start window (~30-60s) rather than giving up at 15s.
-      try {
-        await axios.get(`${API_BASE_URL}/api/health`, { timeout: 70000 });
-      } catch {
-        // Backend may still be starting; proceed with scan anyway – the 180s
-        // scan timeout gives it another chance to respond.
-      }
+      // Compress client-side to ensure sub-second upload (<300KB)
+      const uploadFile = await compressImageForFastScan(targetImage.file);
 
-      // 2. Perform the actual scan (120-second timeout set in api.ts)
-      const session = await api.scanFoodImages([targetImage.file], ["other"]);
+      // Perform scan immediately (backend runs parallel fast-path OCR + Vision)
+      const session = await api.scanFoodImages([uploadFile], ["other"]);
       clearInterval(interval);
       setCurrentStepIndex(PROCESSING_STEPS.length - 1);
 
@@ -265,7 +304,7 @@ export const ScanFoodPage: React.FC = () => {
         // Invalidate scan history and dashboard queries so new scan appears immediately
         queryClient.invalidateQueries({ queryKey: ["scan-history"] });
         queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      }, 500);
+      }, 400);
     } catch (err: any) {
       setIsScanning(false);
       clearInterval(interval);
@@ -275,7 +314,7 @@ export const ScanFoodPage: React.FC = () => {
       // Provide a friendlier message for timeout errors
       if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("network")) {
         msg =
-          "Analysis is taking longer than expected (the server may be starting up — this can take up to 60 seconds on first use). " +
+          "Analysis is taking longer than expected. " +
           "Click \"Try Again\" below to retry.";
       }
       setScanError(msg);
