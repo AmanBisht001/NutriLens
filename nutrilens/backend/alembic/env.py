@@ -24,8 +24,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Ensure alembic uses settings.DATABASE_URL
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Ensure alembic uses settings.DATABASE_URL, escaping % for configparser interpolation
+escaped_url = settings.DATABASE_URL.replace("%", "%%")
+config.set_main_option("sqlalchemy.url", escaped_url)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
