@@ -174,7 +174,7 @@ export const apiService = {
 
     const response = await apiClient.post<ScanSession>("/api/products/scan", formData, {
       headers: {
-        "Content-Type": "multipart/form-data",
+        "Content-Type": undefined,
       },
       timeout: 60000,
     });

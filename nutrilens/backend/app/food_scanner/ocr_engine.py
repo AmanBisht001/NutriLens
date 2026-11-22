@@ -96,13 +96,14 @@ class PaddleOCREngine(BaseOCREngine):
         self.use_angle_cls = use_angle_cls
         self._ocr = None
         self._initialized = False
+        self._init_error = None
 
     def is_initialized(self) -> bool:
-        return self._initialized
+        return self._initialized and self._ocr is not None
 
-    def _ensure_initialized(self):
+    def _ensure_initialized(self) -> bool:
         if self._initialized:
-            return
+            return self._ocr is not None
         try:
             from paddleocr import PaddleOCR
             # Initialize PaddleOCR engine with optimized CPU configuration
@@ -114,14 +115,26 @@ class PaddleOCREngine(BaseOCREngine):
             )
             self._initialized = True
             logger.info("PaddleOCR engine initialized successfully (single-threaded, angle_cls=False).")
+            return True
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR: {e}")
-            raise RuntimeError(
-                f"PaddleOCR is not installed or could not be initialized: {e}"
-            )
+            self._initialized = True
+            self._ocr = None
+            self._init_error = str(e)
+            return False
 
     def extract_text(self, image: Union[np.ndarray, bytes]) -> OCRResult:
-        self._ensure_initialized()
+        if not self._ensure_initialized() or self._ocr is None:
+            err_msg = self._init_error or "PaddleOCR engine is not available"
+            logger.warning(f"PaddleOCR fallback triggered: {err_msg}")
+            return OCRResult(
+                raw_text="",
+                confidence=0.0,
+                lines=[],
+                engine="fallback",
+                ocr_available=False,
+                notes=f"OCR Engine Unavailable: {err_msg}. Please verify image or enter manually.",
+            )
 
         # If bytes passed, decode to OpenCV BGR
         if isinstance(image, bytes):
@@ -140,11 +153,11 @@ class PaddleOCREngine(BaseOCREngine):
                 notes="Failed to decode image input.",
             )
 
-        # Ensure max dimension does not exceed 1200px to maintain sub-second OCR speed on CPU
+        # Ensure max dimension does not exceed 960px to maintain sub-second OCR speed on CPU & low RAM
         h, w = img_cv.shape[:2]
         max_dim = max(h, w)
-        if max_dim > 1200:
-            scale = 1200.0 / max_dim
+        if max_dim > 960:
+            scale = 960.0 / max_dim
             new_w, new_h = int(w * scale), int(h * scale)
             img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
@@ -152,8 +165,19 @@ class PaddleOCREngine(BaseOCREngine):
         if len(img_cv.shape) == 2:
             img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
 
-        # Run PaddleOCR
-        result = self._ocr.ocr(img_cv, cls=self.use_angle_cls)
+        # Run PaddleOCR safely
+        try:
+            result = self._ocr.ocr(img_cv, cls=self.use_angle_cls)
+        except Exception as e:
+            logger.error(f"PaddleOCR runtime inference failed: {e}")
+            return OCRResult(
+                raw_text="",
+                confidence=0.0,
+                lines=[],
+                engine="fallback",
+                ocr_available=False,
+                notes=f"OCR Inference Error: {e}",
+            )
 
         ocr_lines: List[OCRLine] = []
         confidences: List[float] = []

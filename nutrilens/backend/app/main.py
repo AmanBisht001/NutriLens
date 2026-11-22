@@ -46,7 +46,9 @@ async def lifespan(app: FastAPI):
 
     def _load_ocr_engine():
         from app.food_scanner.ocr_engine import get_ocr_engine
-        get_ocr_engine()
+        engine = get_ocr_engine()
+        if hasattr(engine, "_ensure_initialized"):
+            engine._ensure_initialized()
 
     asyncio.create_task(_warmup_ocr())
 

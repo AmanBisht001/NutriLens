@@ -290,8 +290,25 @@ export const ScanFoodPage: React.FC = () => {
       // Compress client-side to ensure sub-second upload (<300KB)
       const uploadFile = await compressImageForFastScan(targetImage.file);
 
-      // Perform scan immediately (backend runs parallel fast-path OCR + Vision)
-      const session = await api.scanFoodImages([uploadFile], ["other"]);
+      // Perform scan with automatic single retry if server was sleeping on cold start
+      let session: ScanSession;
+      try {
+        session = await api.scanFoodImages([uploadFile], ["other"]);
+      } catch (firstErr: any) {
+        const isTransient =
+          firstErr.message?.toLowerCase().includes("network") ||
+          firstErr.message?.toLowerCase().includes("timeout") ||
+          (firstErr.response && firstErr.response.status >= 500);
+
+        if (isTransient) {
+          // Dyno was waking up; wait 1.5s and auto-retry once
+          await new Promise((r) => setTimeout(r, 1500));
+          session = await api.scanFoodImages([uploadFile], ["other"]);
+        } else {
+          throw firstErr;
+        }
+      }
+
       clearInterval(interval);
       setCurrentStepIndex(PROCESSING_STEPS.length - 1);
 
@@ -311,11 +328,10 @@ export const ScanFoodPage: React.FC = () => {
       setViewMode("scan");
       let msg: string =
         err.response?.data?.detail || err.message || "Failed to process food label image.";
-      // Provide a friendlier message for timeout errors
-      if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("network")) {
-        msg =
-          "Analysis is taking longer than expected. " +
-          "Click \"Try Again\" below to retry.";
+      if (err.code === "ECONNABORTED" || msg.toLowerCase().includes("timeout")) {
+        msg = "Analysis request timed out. Please check your internet connection and try again.";
+      } else if (msg.toLowerCase().includes("network error")) {
+        msg = "Unable to reach the analysis server. The backend may be deploying or starting up — please try again in a few seconds.";
       }
       setScanError(msg);
     }
