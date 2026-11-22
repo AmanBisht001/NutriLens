@@ -32,7 +32,7 @@ import type {
 } from "@/types";
 
 const TOKEN_KEY = "nutrilens_auth_token";
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 export const getStoredToken = (): string | null => {
   return localStorage.getItem(TOKEN_KEY);
@@ -176,7 +176,7 @@ export const apiService = {
       headers: {
         "Content-Type": "multipart/form-data",
       },
-      timeout: 120000,
+      timeout: 180000,
     });
     return response.data;
   },

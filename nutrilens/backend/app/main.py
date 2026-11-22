@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,8 +32,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database table initialization deferred (db offline or unreachable): {e}")
 
-    # Keep startup lightweight to avoid OOM restarts on memory-constrained cloud hosts (e.g. Render 512MB RAM).
-    # Heavy models (PaddleOCR) initialize lazily on the first incoming scan request.
+    # Schedule OCR pre-warming as a non-blocking background task.
+    # This runs AFTER Uvicorn accepts the first health-check ping (dyno appears healthy
+    # immediately) but warms the PaddleOCR model so it is ready before the first real scan.
+    # Uses asyncio.create_task so it does NOT block startup or cause OOM during lifespan.
+    async def _warmup_ocr():
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _load_ocr_engine)
+            logger.info("Background OCR pre-warm complete.")
+        except Exception as exc:
+            logger.warning(f"Background OCR pre-warm skipped: {exc}")
+
+    def _load_ocr_engine():
+        from app.food_scanner.ocr_engine import get_ocr_engine
+        get_ocr_engine()
+
+    asyncio.create_task(_warmup_ocr())
+
     yield
 
 

@@ -18,12 +18,16 @@ email-validator>=2.0.0,<3.0.0
 numpy>=1.26.0,<3.0.0
 opencv-python-headless>=4.10.0,<5.0.0
 Pillow>=10.4.0,<12.0.0
-paddleocr>=2.8.0; python_version < '3.13'
-paddlepaddle>=2.6.0; python_version < '3.13'
-protobuf>=3.20.2; python_version < '3.13'
-opt-einsum>=3.3.0; python_version < '3.13'
-astor>=0.8.1; python_version < '3.13'
-decorator>=5.1.1; python_version < '3.13'
+# PaddleOCR + PaddlePaddle (CPU-only, installed from PaddlePaddle's stable index)
+# The paddlepaddle wheel is NOT on PyPI for manylinux_2_28/cp311 – install via
+# --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
+# That flag is added in render.yaml buildCommand and also in pip.conf if needed.
+paddleocr>=2.9.0; python_version >= '3.8' and python_version < '3.13'
+paddlepaddle; python_version >= '3.8' and python_version < '3.13'
+protobuf>=3.20.2; python_version >= '3.8' and python_version < '3.13'
+opt-einsum>=3.3.0; python_version >= '3.8' and python_version < '3.13'
+astor>=0.8.1; python_version >= '3.8' and python_version < '3.13'
+decorator>=5.1.1; python_version >= '3.8' and python_version < '3.13'
 google-genai>=3.6.0
 openai>=3.50.0
 rapidfuzz>=3.10.0

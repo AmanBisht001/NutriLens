@@ -27,7 +27,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api } from "@/services/api";
+import axios from "axios";
+import { api, API_BASE_URL } from "@/services/api";
 import type {
   ScanSession,
   ExtractedNutritionFacts,
@@ -239,13 +240,15 @@ export const ScanFoodPage: React.FC = () => {
     }, 4000);
 
     try {
-      // 1. Ping the health endpoint first so Render's free-tier dyno wakes up
-      //    before we send the heavyweight scan payload. Ignore errors – this is
-      //    best-effort only (the scan call itself will retry on timeout).
+      // 1. Ping the health endpoint first so Render's free-tier dyno fully wakes up
+      //    before we send the heavyweight scan payload.
+      //    Use a 70-second dedicated timeout so we actually wait through Render's
+      //    cold-start window (~30-60s) rather than giving up at 15s.
       try {
-        await api.checkHealth();
+        await axios.get(`${API_BASE_URL}/api/health`, { timeout: 70000 });
       } catch {
-        // Backend may still be waking; proceed anyway
+        // Backend may still be starting; proceed with scan anyway – the 180s
+        // scan timeout gives it another chance to respond.
       }
 
       // 2. Perform the actual scan (120-second timeout set in api.ts)
@@ -272,8 +275,8 @@ export const ScanFoodPage: React.FC = () => {
       // Provide a friendlier message for timeout errors
       if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("network")) {
         msg =
-          "Analysis is taking longer than expected (the server may be starting up). " +
-          "Please wait a few seconds and try again.";
+          "Analysis is taking longer than expected (the server may be starting up — this can take up to 60 seconds on first use). " +
+          "Click \"Try Again\" below to retry.";
       }
       setScanError(msg);
     }
@@ -1226,9 +1229,23 @@ export const ScanFoodPage: React.FC = () => {
       </div>
 
       {scanError && (
-        <div className="mb-6 p-4 bg-rose-50 border border-rose-200 dark:bg-rose-950/60 dark:border-rose-800 rounded-lg flex items-center gap-3 text-rose-800 dark:text-rose-200 text-sm">
-          <AlertTriangle className="h-5 w-5 text-rose-600 flex-shrink-0" />
-          <span>{scanError}</span>
+        <div className="mb-6 p-4 bg-rose-50 border border-rose-200 dark:bg-rose-950/60 dark:border-rose-800 rounded-lg text-rose-800 dark:text-rose-200 text-sm">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-rose-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p>{scanError}</p>
+              {(scanError.toLowerCase().includes("timeout") || scanError.toLowerCase().includes("starting up")) && queuedImage && (
+                <button
+                  onClick={() => executeAutomatedScan(queuedImage)}
+                  disabled={isScanning}
+                  className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded bg-rose-100 hover:bg-rose-200 dark:bg-rose-900 dark:hover:bg-rose-800 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Try Again
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
