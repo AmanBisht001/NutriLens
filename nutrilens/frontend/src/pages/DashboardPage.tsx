@@ -1,5 +1,6 @@
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   ScanLine,
   Camera,
@@ -12,19 +13,39 @@ import {
   Activity,
   Layers,
   ChevronRight,
+  RefreshCw,
+  Clock,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { api } from "@/services/api";
+import type { ScanHistoryItem } from "@/types";
 
 export const DashboardPage: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
 
   const dietaryPreference = user?.profile?.dietary_preference || "None";
   const allergies = user?.profile?.allergies || [];
   const restrictions = user?.profile?.dietary_restrictions || [];
   const goals = user?.profile?.nutrition_goals || [];
+
+  // Fetch real scan history from backend
+  const {
+    data: scanHistoryData,
+    isLoading: isLoadingScans,
+    isError: isScansError,
+    error: scansError,
+    refetch: refetchScans,
+  } = useQuery({
+    queryKey: ["scan-history", user?.id],
+    queryFn: () => api.getScanHistory(1, 5),
+    enabled: !!user,
+  });
+
+  const recentScans: ScanHistoryItem[] = scanHistoryData?.items || [];
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-7xl mx-auto w-full">
@@ -131,32 +152,159 @@ export const DashboardPage: React.FC = () => {
                 <ScanLine className="h-5 w-5 text-emerald-600" />
                 <CardTitle className="text-base font-bold">Recently Scanned Products</CardTitle>
               </div>
-              <Badge variant="outline" className="text-xs text-slate-500">
-                Live History
-              </Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                asChild
+                className="h-7 text-xs text-slate-600 hover:text-emerald-700 hover:bg-emerald-50 px-2"
+              >
+                <Link to="/scan">
+                  <span>Live Scanner</span>
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Link>
+              </Button>
             </div>
             <CardDescription>
-              Chronological log of items scanned via OCR or barcode reader.
+              Chronological log of items scanned via OCR or packaging reader.
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-            {/* Genuine Empty State (No Fabricated Statistics) */}
-            <div className="h-14 w-14 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 mb-4 shadow-xs">
-              <Layers className="h-7 w-7" />
-            </div>
-            <h3 className="text-base font-semibold text-slate-900">
-              No products scanned yet
-            </h3>
-            <p className="text-sm text-slate-500 max-w-sm mt-1.5 leading-relaxed">
-              When you scan food packages or upload nutrition labels, your product history and compatibility
-              breakdowns will appear here.
-            </p>
-            <Button asChild size="sm" className="mt-5 bg-emerald-600 hover:bg-emerald-700 text-white">
-              <Link to="/scan">
-                <Camera className="h-4 w-4 mr-1.5" />
-                Scan First Product
-              </Link>
-            </Button>
+          <CardContent className="flex-1 p-0">
+            {isLoadingScans ? (
+              <div className="flex flex-col items-center justify-center p-8 space-y-3">
+                <RefreshCw className="h-6 w-6 text-emerald-600 animate-spin" />
+                <p className="text-sm text-slate-500">Loading your scanned items...</p>
+              </div>
+            ) : isScansError ? (
+              <div className="p-8 text-center flex flex-col items-center justify-center">
+                <div className="h-12 w-12 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center mb-3">
+                  <AlertTriangle className="h-6 w-6" />
+                </div>
+                <h4 className="text-sm font-semibold text-slate-800">Failed to load scan history</h4>
+                <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                  {(scansError as any)?.message || "A network or server error occurred."}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => refetchScans()}
+                  className="mt-4 text-xs h-8"
+                >
+                  <RefreshCw className="h-3.5 w-3.5 mr-1" /> Retry
+                </Button>
+              </div>
+            ) : recentScans.length === 0 ? (
+              /* Genuine Empty State (No Fabricated Statistics) */
+              <div className="flex flex-col items-center justify-center p-8 text-center">
+                <div className="h-14 w-14 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 mb-4 shadow-xs">
+                  <Layers className="h-7 w-7" />
+                </div>
+                <h3 className="text-base font-semibold text-slate-900">
+                  No products scanned yet
+                </h3>
+                <p className="text-sm text-slate-500 max-w-sm mt-1.5 leading-relaxed">
+                  When you scan food packages or upload nutrition labels, your product history and compatibility
+                  breakdowns will appear here.
+                </p>
+                <Button asChild size="sm" className="mt-5 bg-emerald-600 hover:bg-emerald-700 text-white">
+                  <Link to="/scan">
+                    <Camera className="h-4 w-4 mr-1.5" />
+                    Scan First Product
+                  </Link>
+                </Button>
+              </div>
+            ) : (
+              /* Real List of Scanned Products */
+              <div className="divide-y divide-slate-100">
+                {recentScans.map((scan) => {
+                  const scoreBadgeColor =
+                    scan.grade === "A"
+                      ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+                      : scan.grade === "B"
+                      ? "bg-green-100 text-green-800 border-green-300"
+                      : scan.grade === "C"
+                      ? "bg-amber-100 text-amber-800 border-amber-300"
+                      : scan.grade === "D"
+                      ? "bg-orange-100 text-orange-800 border-orange-300"
+                      : scan.grade === "E"
+                      ? "bg-rose-100 text-rose-800 border-rose-300"
+                      : "bg-slate-100 text-slate-700 border-slate-300";
+
+                  const formattedDate = scan.created_at
+                    ? new Date(scan.created_at).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : "Recently";
+
+                  return (
+                    <div
+                      key={scan.id}
+                      onClick={() => navigate(`/scan?id=${scan.id}`)}
+                      className="p-4 flex items-center justify-between hover:bg-slate-50 transition cursor-pointer group"
+                    >
+                      <div className="flex items-center space-x-3.5 min-w-0">
+                        {scan.image_url ? (
+                          <img
+                            src={scan.image_url}
+                            alt={scan.product_name}
+                            className="h-12 w-12 rounded-lg object-cover border border-slate-200 bg-white shrink-0"
+                          />
+                        ) : (
+                          <div className="h-12 w-12 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
+                            <Camera className="h-6 w-6" />
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-900 truncate group-hover:text-emerald-700 transition">
+                            {scan.product_name || "Unknown Product"}
+                          </p>
+                          <div className="flex items-center space-x-2 text-xs text-slate-500 mt-0.5">
+                            {scan.brand && (
+                              <span className="font-medium text-slate-700">{scan.brand} •</span>
+                            )}
+                            <span className="flex items-center">
+                              <Clock className="h-3 w-3 mr-1 inline" />
+                              {formattedDate}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-3 shrink-0 ml-3">
+                        {scan.score !== null && scan.score !== undefined ? (
+                          <div className="text-right">
+                            <Badge className={`text-xs font-bold border px-2 py-0.5 ${scoreBadgeColor}`}>
+                              {scan.score}/100 ({scan.grade || "Score"})
+                            </Badge>
+                          </div>
+                        ) : (
+                          <Badge variant="outline" className="text-xs text-slate-500 border-slate-200">
+                            Nutrients N/A
+                          </Badge>
+                        )}
+                        <ChevronRight className="h-4 w-4 text-slate-400 group-hover:text-emerald-600 transition" />
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <div className="p-3 bg-slate-50/50 border-t border-slate-100 text-center">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    asChild
+                    className="text-xs text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 w-full"
+                  >
+                    <Link to="/scan">
+                      <Camera className="h-3.5 w-3.5 mr-1.5" />
+                      Scan Another Product
+                    </Link>
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
 

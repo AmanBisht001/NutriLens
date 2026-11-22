@@ -122,12 +122,58 @@ def fix_orientation(pil_image: Image.Image) -> Image.Image:
     return pil_image
 
 
+def assess_image_quality(img_cv: np.ndarray) -> Dict[str, Any]:
+    """
+    Evaluates image blur via Laplacian variance and overall brightness.
+    Returns:
+        {
+            "is_blurry": bool,
+            "blur_score": float,
+            "brightness": float,
+            "is_too_dark": bool,
+            "is_too_bright": bool,
+            "quality_warning": Optional[str],
+        }
+    """
+    if len(img_cv.shape) == 3:
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_cv
+
+    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(np.mean(gray))
+
+    # A variance below 50 indicates substantial blur on typical document/label captures
+    is_blurry = laplacian_var < 50.0
+    is_too_dark = brightness < 40.0
+    is_too_bright = brightness > 230.0
+
+    warning = None
+    if is_blurry:
+        warning = "Image appears blurry or out of focus. Text extraction may be incomplete."
+    elif is_too_dark:
+        warning = "Image is very dark. Please capture the label in better lighting."
+    elif is_too_bright:
+        warning = "Image is overexposed or washed out with glare."
+
+    return {
+        "is_blurry": is_blurry,
+        "blur_score": round(laplacian_var, 2),
+        "brightness": round(brightness, 2),
+        "is_too_dark": is_too_dark,
+        "is_too_bright": is_too_bright,
+        "quality_warning": warning,
+    }
+
+
 def preprocess_image(
     image_bytes: bytes,
     enhance_for_ocr: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Decodes image, fixes orientation, and optionally applies OpenCV enhancement:
+    Decodes image, fixes orientation, runs quality assessment, and applies OpenCV enhancement:
+    - Orientation correction via EXIF
+    - Blur & lighting assessment
     - Grayscale conversion
     - Noise reduction / bilateral filtering
     - Contrast enhancement (CLAHE)
@@ -147,9 +193,12 @@ def preprocess_image(
         rgb_array = np.array(upright_img)
         bgr_img = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
 
+    quality = assess_image_quality(bgr_img)
+
     metadata: Dict[str, Any] = {
         "original_width": orig_width,
         "original_height": orig_height,
+        "quality": quality,
         "enhanced": False,
     }
 

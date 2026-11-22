@@ -59,15 +59,44 @@ def extract_brand(text: str) -> Optional[str]:
 def extract_product_name(text: str, detected_brand: Optional[str] = None) -> Optional[str]:
     """
     Extracts probable product name from first non-empty lines,
-    skipping obvious headers or brand names.
+    skipping obvious headers, section markers, ingredient lists, or standalone brand names.
     """
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    for line in lines[:5]:
-        # Skip generic labels
-        if re.match(r"^(nutrition facts|ingredients|contains|net wt|batch|mfg|exp|mrp)", line, re.IGNORECASE):
+    in_ingredients = False
+    in_nutrition = False
+
+    for line in lines[:15]:
+        # Skip OCR label section header markers (e.g. --- [OTHER LABEL] ---)
+        if line.startswith("---") or line.endswith("---") or (line.startswith("[") and line.endswith("]")):
+            continue
+        # Track ingredients start
+        if re.match(r"^ingredients?\b", line, re.IGNORECASE):
+            in_ingredients = True
+            in_nutrition = False
+            continue
+        # Track nutrition start
+        if re.match(r"^nutrition\b", line, re.IGNORECASE):
+            in_ingredients = False
+            in_nutrition = True
+            continue
+        # If inside ingredients or nutrition block, skip
+        if in_ingredients or in_nutrition:
+            continue
+        # Skip generic section headers or nutrient names
+        if re.match(r"^(nutrition facts|nutrition information|ingredients|contains|allergen|net wt|batch|mfg|exp|mrp|energy|fat|carbohydrate|sugar|protein|sodium|serving|per\b)", line, re.IGNORECASE):
             continue
         # Skip pure brand line if identical
         if detected_brand and line.strip().lower() == detected_brand.lower():
+            continue
+        # Skip lines with multiple commas (typically lists of ingredients)
+        if line.count(",") >= 2:
+            continue
+        # Skip lines with numbers and units (like 500 kcal or 40g)
+        if re.search(r"\b\d+\s*(?:g|mg|kcal|kj|ml)\b", line, re.IGNORECASE):
+            continue
+        # Skip lines with no letters/numbers
+        clean_alpha = re.sub(r"[^a-zA-Z0-9\s]", "", line).strip()
+        if len(clean_alpha) < 3:
             continue
         # Return plausible title
         if len(line) >= 3 and len(line) <= 100:
@@ -78,17 +107,18 @@ def extract_product_name(text: str, detected_brand: Optional[str] = None) -> Opt
 def extract_serving_size(text: str) -> Optional[str]:
     """
     Detects serving size patterns:
-    'Serving Size: 30g', 'Per serve (25g)', 'Per 100g', etc.
+    'Serving Size: 30g', 'Serve Size20g*', 'Serve Size 20g', 'Per serve (25g)', 'Per 100g', etc.
     """
     patterns = [
-        r"(?:serving size|portion size|per serve|serve size)[:\s]+([0-9]+(?:\.[0-9]+)?\s*(?:g|ml|oz|piece|pieces|biscuit|biscuits|slice|slices)[^,\n\.]*)",
+        r"(?:serving\s*size|portion\s*size|per\s*serve|serve\s*size)[:\s*]*([0-9]+(?:\.[0-9]+)?\s*(?:g|ml|oz|piece|pieces|biscuit|biscuits|slice|slices)[^,\n\.]*)",
         r"(?:approx\.\s*)?([0-9]+(?:\.[0-9]+)?\s*(?:g|ml)\s*\([^)]+\))",
         r"(?:per\s+serving\s*\(([^)]+)\))",
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            return m.group(1).strip()
+            clean_val = m.group(1).strip().rstrip("*").strip()
+            return clean_val
     return None
 
 
@@ -138,8 +168,8 @@ def extract_ingredients(text: str) -> Tuple[Optional[str], List[str]]:
     """
     Detects ingredients section and returns (raw_ingredients_text, list_of_individual_ingredients).
     """
-    # Regex to find starting tag: "INGREDIENTS:" or "INGREDIENTS :"
-    start_match = re.search(r"\bINGREDIENTS?\s*[:\-]\s*", text, re.IGNORECASE)
+    # Regex to find starting tag: "INGREDIENTS:", "INGREDIENTS -", or standalone "INGREDIENTS" line
+    start_match = re.search(r"\bINGREDIENTS?\s*[:\-\n]\s*", text, re.IGNORECASE)
     if not start_match:
         # Check alternative: text starting with "Contains: ..." where no other ingredients block exists
         return None, []
@@ -149,16 +179,16 @@ def extract_ingredients(text: str) -> Tuple[Optional[str], List[str]]:
 
     # Stop at allergen declaration, nutrition table, or manufacturing details
     stop_match = re.search(
-        r"(?:\n\s*\n|ALLERGEN\s+INFORMATION|ALLERGENS?|CONTAINS\s+ALLERGENS?|MAY\s+CONTAIN|MFD\s+BY|NUTRITION\s+FACTS|STORE\s+IN|NET\s+QUANTITY|BATCH\s+NO)",
+        r"(?:\n\s*\n|ALLERGEN\s+INFORMATION|ALLERGENS?|CONTAINS\s+ALLERGENS?|MAY\s+CONTAIN|MFD\s+BY|NUTRITION\s+FACTS|NUTRITION\s+INFORMATION|STORE\s+IN|NET\s+QUANTITY|BATCH\s+NO)",
         remaining,
         re.IGNORECASE,
     )
     if stop_match:
         raw_section = remaining[: stop_match.start()]
     else:
-        # If no explicit stop, take the first 400 characters or 3 lines
+        # If no explicit stop, take up to 6 lines or 600 characters
         lines = remaining.split("\n")
-        raw_section = " ".join([l.strip() for l in lines[:4] if l.strip()])
+        raw_section = " ".join([l.strip() for l in lines[:6] if l.strip()])
 
     raw_section = " ".join(raw_section.split()).strip()
     # Remove terminal period
@@ -169,7 +199,7 @@ def extract_ingredients(text: str) -> Tuple[Optional[str], List[str]]:
 
 
 def _extract_number(pattern: str, text: str) -> Optional[float]:
-    """Helper to find float nutrient values from regex pattern."""
+    """Helper to find float nutrient values from regex pattern, supporting space-separated lines."""
     m = re.search(pattern, text, re.IGNORECASE)
     if m:
         try:
@@ -183,7 +213,7 @@ def _extract_number(pattern: str, text: str) -> Optional[float]:
 def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
     """
     Extracts key macronutrients from nutrition facts text.
-    Handles per 100g or per serving figures.
+    Handles per 100g or per serving figures across both inline and multi-line formats.
     """
     facts: Dict[str, Optional[float]] = {
         "energy_kcal": None,
@@ -200,66 +230,66 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
 
     # 1. Energy / Calories (kcal or kJ)
     facts["energy_kcal"] = _extract_number(
-        r"(?:energy|calories|energy\s+value)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*(?:kcal|cal)?",
+        r"(?:energy|calories|energy\s+value)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:kcal|cal)?",
         text,
     )
 
-    # 2. Total Fat
+    # 2. Total Fat (ignore if preceded by Saturated or Trans)
     facts["total_fat_g"] = _extract_number(
-        r"(?:total\s+fat|fat|crude\s+fat)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?<!saturated\s)(?<!trans\s)(?:total\s+fat|fat|crude\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 3. Saturated Fat
     facts["saturated_fat_g"] = _extract_number(
-        r"(?:saturated\s+fat|saturated\s+fatty\s+acids|saturates)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?:saturated\s+fat|saturated\s+fatty\s+acids|saturates)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 4. Trans Fat
     facts["trans_fat_g"] = _extract_number(
-        r"(?:trans\s+fat|trans\s+fatty\s+acids)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?:trans\s+fat|trans\s+fatty\s+acids)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 5. Carbohydrates
     facts["carbohydrates_g"] = _extract_number(
-        r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
-    # 6. Total Sugars
+    # 6. Total Sugars (ignore if preceded by Added)
     facts["total_sugar_g"] = _extract_number(
-        r"(?:total\s+sugars?|sugars?)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?<!added\s)(?:total\s+sugars?|sugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 7. Added Sugars
     facts["added_sugar_g"] = _extract_number(
-        r"(?:added\s+sugars?)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?:added\s+sugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 8. Dietary Fibre
     facts["dietary_fibre_g"] = _extract_number(
-        r"(?:dietary\s+fib(?:re|er)|fib(?:re|er))[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?:dietary\s+fib(?:re|er)|fib(?:re|er))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 9. Protein
     facts["protein_g"] = _extract_number(
-        r"(?:protein|crude\s+protein)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g",
+        r"(?:protein|crude\s+protein)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
         text,
     )
 
     # 10. Sodium (mg or g)
     sodium_val = _extract_number(
-        r"(?:sodium)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
+        r"(?:sodium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
         text,
     )
     if sodium_val is not None:
         # Check if unit was grams
-        m_g = re.search(r"(?:sodium)[:\s]+([0-9]+(?:\.[0-9]+)?)\s*g\b", text, re.IGNORECASE)
+        m_g = re.search(r"(?:sodium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*g\b", text, re.IGNORECASE)
         if m_g:
             sodium_val = sodium_val * 1000.0  # Convert grams to mg
         facts["sodium_mg"] = sodium_val

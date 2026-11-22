@@ -13,23 +13,45 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, get_current_user_optional
+from app.api.deps import get_db, get_current_user_optional, get_current_user
 from app.models.user import User
 from app.schemas.scan import (
     ScanResponse,
     ScanCorrectionRequest,
     ScanConfirmRequest,
     ScanConfirmResponse,
+    ScanHistoryResponse,
 )
 from app.food_scanner.service import (
     process_scan_upload,
     get_scan_by_id,
+    get_user_scan_history,
     update_scan_correction,
     confirm_scan_and_create_product,
     UPLOAD_DIR,
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/scans/history",
+    response_model=ScanHistoryResponse,
+    summary="Retrieve the authenticated user's chronological scan history",
+)
+def list_user_scans(
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns the authenticated user's scans, sorted newest first, with NutriLens scores and images."""
+    return get_user_scan_history(
+        user_id=current_user.id,
+        db=db,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post(
@@ -66,28 +88,30 @@ async def scan_food_product(
 @router.get(
     "/scans/{scan_id}",
     response_model=ScanResponse,
-    summary="Retrieve scan session details and OCR results",
+    summary="Retrieve scan session details, analysis, and OCR results",
 )
 def get_scan(
     scan_id: str,
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """Returns the scan record, raw OCR text, structured extracted fields, and any user corrections."""
-    return get_scan_by_id(scan_id, db)
+    """Returns the scan record, raw OCR text, structured extracted fields, automated analysis, and user corrections."""
+    return get_scan_by_id(scan_id, db, current_user=current_user)
 
 
 @router.put(
     "/scans/{scan_id}/correction",
     response_model=ScanResponse,
-    summary="Update manual corrections on extracted scan fields",
+    summary="Update manual corrections on extracted scan fields and re-analyze",
 )
 def save_scan_correction(
     scan_id: str,
     correction: ScanCorrectionRequest,
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """Allows user to correct OCR errors (product name, brand, ingredients, nutrition facts, allergens)."""
-    return update_scan_correction(scan_id, correction, db)
+    """Allows user to correct OCR fields and re-computes score, ingredient intelligence, and personal suitability."""
+    return update_scan_correction(scan_id, correction, db, current_user=current_user)
 
 
 @router.post(

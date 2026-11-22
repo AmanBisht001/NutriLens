@@ -2,7 +2,7 @@
 NutriLens – Food Scanner Pydantic Schemas (Day 4)
 """
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 
 
@@ -80,11 +80,33 @@ class ScanResponse(BaseModel):
     extracted_data: Optional[Dict[str, Any]] = None
     corrected_data: Optional[Dict[str, Any]] = None
     product_id: Optional[str] = None
+    analysis: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_analysis_field(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("analysis"):
+                corr = data.get("corrected_data") or {}
+                extr = data.get("extracted_data") or {}
+                data["analysis"] = corr.get("analysis") or extr.get("analysis")
+            return data
+        # For ORM object
+        current_val = getattr(data, "analysis", None)
+        if current_val is None:
+            corr = getattr(data, "corrected_data", None) or {}
+            extr = getattr(data, "extracted_data", None) or {}
+            analysis_val = corr.get("analysis") or extr.get("analysis")
+            try:
+                setattr(data, "analysis", analysis_val)
+            except Exception:
+                pass
+        return data
 
 
 class ScanConfirmResponse(BaseModel):
@@ -92,3 +114,27 @@ class ScanConfirmResponse(BaseModel):
     scan_id: str
     product_id: str
     product: Dict[str, Any]
+
+
+class ScanHistoryItem(BaseModel):
+    id: str
+    product_name: str
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    created_at: Optional[datetime] = None
+    status: str
+    score: Optional[int] = None
+    grade: Optional[str] = None
+    rating_label: Optional[str] = None
+    rating_color: Optional[str] = None
+    image_url: Optional[str] = None
+    ocr_confidence: float = 0.0
+    ocr_engine: str = "paddleocr"
+    is_scoreable: bool = False
+
+
+class ScanHistoryResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: List[ScanHistoryItem]

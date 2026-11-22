@@ -15,6 +15,7 @@ import type {
   ScanCorrectionPayload,
   ScanConfirmPayload,
   ScanConfirmResponse,
+  ScanHistoryResponse,
   NutritionAnalysis,
   AdminDashboardStats,
   AdminProductCreatePayload,
@@ -182,6 +183,13 @@ export const apiService = {
 
   getScanSession: async (id: string): Promise<ScanSession> => {
     const response = await apiClient.get<ScanSession>(`/api/scans/${id}`);
+    return response.data;
+  },
+
+  getScanHistory: async (page: number = 1, pageSize: number = 20): Promise<ScanHistoryResponse> => {
+    const response = await apiClient.get<ScanHistoryResponse>("/api/scans/history", {
+      params: { page, page_size: pageSize },
+    });
     return response.data;
   },
 

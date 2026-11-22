@@ -23,6 +23,10 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_db():
     Base.metadata.create_all(bind=engine_test)
+    with TestingSessionLocal() as session:
+        from app.seed import seed_database
+        seed_database(session)
+        session.commit()
     yield
     Base.metadata.drop_all(bind=engine_test)
 

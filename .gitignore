@@ -31,6 +31,12 @@ pnpm-debug.log*
 .env.*.local
 *.pem
 
+# Uploaded scan images (runtime data, not source code)
+nutrilens/backend/app/uploads/scans/*.jpg
+nutrilens/backend/app/uploads/scans/*.jpeg
+nutrilens/backend/app/uploads/scans/*.png
+nutrilens/backend/app/uploads/scans/*.webp
+
 # IDE & OS
 .vscode/
 .idea/

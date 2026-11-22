@@ -76,8 +76,12 @@ class PaddleOCREngine(BaseOCREngine):
             return
         try:
             from paddleocr import PaddleOCR
-            # Initialize PaddleOCR engine
-            self._ocr = PaddleOCR(use_angle_cls=self.use_angle_cls, lang=self.lang)
+            # Initialize PaddleOCR engine with CPU configuration
+            self._ocr = PaddleOCR(
+                use_angle_cls=self.use_angle_cls,
+                lang=self.lang,
+                enable_mkldnn=False,
+            )
             self._initialized = True
             logger.info("PaddleOCR engine initialized successfully.")
         except Exception as e:
@@ -105,6 +109,10 @@ class PaddleOCREngine(BaseOCREngine):
                 ocr_available=True,
                 notes="Failed to decode image input.",
             )
+
+        # Ensure image has 3 channels for PaddleOCR
+        if len(img_cv.shape) == 2:
+            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
 
         # Run PaddleOCR
         result = self._ocr.ocr(img_cv, cls=self.use_angle_cls)

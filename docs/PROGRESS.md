@@ -1,8 +1,98 @@
 # NutriLens – Development Progress Tracking
 
-## Project Status: Day 10 Complete (Final Integration, Testing & Release)
-- **Current Milestone**: Day 10 – Complete 14-Step User Journey Integration, Automated Testing, Security & Data Protection Verification, Production Deployment Blueprints, Final Architecture & API Documentation
-- **Status**: Completed & Verified — 110/110 backend tests pass (100%), 0 frontend TypeScript errors, production build succeeds
+## Project Status: Production OCR & Multimodal Vision Pipeline Release
+- **Current Milestone**: Real OCR & Multimodal Food Label Intelligence Pipeline (Active PaddleOCR Engine, Multi-line Nutrient Parser, Blur & Lighting Preprocessor, Gemini/OpenAI Vision Fallback, 100% Real Image Verification)
+- **Status**: Completed & Verified — 121 backend tests pass (100%), 0 frontend TypeScript errors, production build succeeds
+
+---
+
+## Real OCR & Multimodal Vision Extraction Checklist (Day 11)
+
+### 1. PaddleOCR Engine Repair & Activation
+- [x] Identified root cause of `FALLBACKOCR` fallback: `paddleocr` was missing from python venv, and initial wheel installation failed due to Windows binary incompatibilities (`OneDnnContext` `fused_conv2d` filter crash in paddlepaddle 3.x).
+- [x] Installed `paddlepaddle==2.6.2` and `paddleocr==2.10.0` with compatible dependencies (`protobuf<=3.20.2`, `opt-einsum==3.3.0`, `astor`, `decorator`).
+- [x] Configured `PaddleOCREngine` with `enable_mkldnn=False` and CPU inference flags to ensure reliable execution on Windows systems without oneDNN crashes.
+- [x] Automatic 3-channel BGR conversion when OpenCV single-channel enhanced images are passed to PaddleOCR.
+
+### 2. Multi-line & Multi-column Label Parser
+- [x] Enhanced `extract_nutrition_facts()` regex to parse both inline (`Energy: 554kcal`) and multi-line (`Energy\n554kcal\n6%`) table formats.
+- [x] Negative lookbehinds prevent misclassifying `Saturated Fat` or `Trans Fat` as `Total Fat`.
+- [x] Fixed `extract_serving_size()` to detect `Serve Size20g*`, `Serve Size: 30g`, and strip trailing asterisks.
+- [x] Enhanced `extract_ingredients()` to handle standalone `INGREDIENTS\n...` headers and `NUTRITION INFORMATION` boundaries.
+
+### 3. OpenCV Quality Assessment & Preprocessor
+- [x] Implemented `assess_image_quality()` using Laplacian variance for blur detection (`< 50.0`) and average grayscale intensity for under/over-exposure.
+- [x] Retained EXIF orientation correction, CLAHE contrast adaptation, and bilateral edge-preserving smoothing.
+
+### 4. Multimodal Vision Extraction Fallback
+- [x] Created `MultimodalVisionExtractor` in `app/food_scanner/vision_extractor.py` supporting Gemini (`gemini-2.5-flash`) and OpenAI (`gpt-4o-mini`).
+- [x] Strict JSON schema enforcing null for unread values and preventing fabrication of zeros or missing nutrients.
+- [x] Automated fallback triggered when OCR yields incomplete nutrients or ingredients.
+
+### 5. Verification on Real Packaged Food Images
+- [x] Implemented `tests/test_real_label_pipeline.py` testing against an actual uploaded food label (`bb0b435f-91e4-4543-99ec-32592bd94dcd_0_other.png`).
+- [x] Verified complete extraction: 554 kcal energy, 33.4g fat, 15.1g sat fat, 0.1g trans fat, 57.5g carbs, 1.4g sugar, 6.0g protein, 694mg sodium, 20g serve size.
+- [x] Verified deterministic score generation: Score 17/100 (Grade E) with positive and penalty factors.
+- [x] All 26 scanner tests pass, 121 backend tests pass in total.
+
+### 6. Dashboard Recently Scanned Products & Scan History Integration
+- [x] Implemented `GET /api/scans/history` endpoint with pagination (`page`, `page_size`), sorted newest first.
+- [x] Strict user isolation: query filtered by `ProductScan.user_id == current_user.id`; users cannot view other users' scans.
+- [x] Object-level permissions on `GET /api/scans/{scan_id}`: blocks access with `403 Forbidden` if requester is neither the scan owner nor an admin.
+- [x] Preserves honest reporting for unknown product titles (`"Unknown Product"`) and null scores (`is_scoreable: false`).
+- [x] Connected frontend `DashboardPage.tsx` using `@tanstack/react-query` (`["scan-history", user?.id]`), displaying real scan data: product title, brand, timestamp, label image thumbnail, and score badge.
+- [x] Deep linking: clicking any scanned item in the dashboard automatically loads its complete analysis report via `/scan?id=<scan_id>`.
+- [x] Automatic cache invalidation: `queryClient.invalidateQueries({ queryKey: ["scan-history"] })` immediately updates the dashboard upon completing a scan.
+- [x] Verified with new automated test suite (`tests/test_scan_history.py`) — 29/29 scanner tests passing, 124 backend tests passing.
+
+---
+
+## Automated Food Scanning Workflow Completion Checklist
+
+### 1. End-to-End Automated Pipeline
+- [x] **Zero Manual Identification Requirement**:
+  - Scanning does NOT require product name entry, brand search, catalogue selection, or barcode scanning.
+  - Defaults gracefully to `"Unknown Product"` when title cannot be parsed, maintaining full analytical functionality.
+  - Direct transition from image capture/upload to the full analysis report.
+- [x] **Backend Automated Analysis Engine**:
+  - Implemented `run_scan_analysis` and `match_and_explain_ingredients` in `app/food_scanner/service.py`.
+  - Integrates OCR extraction, deterministic nutrition scoring (`analyze_nutrition_payload`), ingredient intelligence, and personal dietary suitability (`evaluate_suitability`).
+  - Stores complete report in `scan.extracted_data["analysis"]` and dynamically returns it in `ScanResponse`.
+  - Immediate re-analysis on user edits via `PUT /api/scans/{id}/correction`.
+- [x] **Ingredient Intelligence & Taxonomy Matching**:
+  - Matches OCR tokens against the canonical `Ingredient` knowledge base via normalized name, exact name, INS code, aliases, and fuzzy tokens.
+  - Distinguishes recognized ingredients (with purpose, category, concern level, INS code, common allergen status) from unrecognized text.
+  - Explicitly reports when ingredient declarations are missing without assuming safety.
+- [x] **Honest Nutrition Scoring**:
+  - Calculates NutriLens score (0–100) and grade (A–E) when complete macronutrients are declared.
+  - Clearly reports `"Nutritional scoring unavailable"` when nutrition tables are missing or incomplete; never assumes missing nutrients are zero.
+- [x] **Personalized Dietary Suitability**:
+  - Evaluates against logged-in user's dietary preferences (Vegetarian, Vegan, Jain), declared allergies, and restrictions.
+  - Provides clear status: Suitable / Caution / Declared Restriction Conflict / Insufficient Information.
+  - Generates guest banner with login prompt when user is not authenticated.
+- [x] **Modern Automated Frontend Experience (`ScanFoodPage.tsx`)**:
+  - Simplified scanning UI with Take Photo (camera preview & snapshot) and Upload Image (file selector & preview).
+  - Multi-stage animated processing sequence:
+    1. *Uploading image...*
+    2. *Reading food label...*
+    3. *Extracting ingredients...*
+    4. *Analyzing nutritional values...*
+    5. *Checking dietary suitability...*
+    6. *Preparing your report...*
+  - Comprehensive results presentation: Section A (Product Overview), Section B (NutriLens Score), Section C (Nutrition Breakdown Table), Section D (Ingredient Intelligence), Section E (Personalized Suitability), Section F (Data Quality & OCR Uncertainty).
+  - Interactive "Edit Extracted Values" drawer with instant "Re-calculate Analysis" action.
+  - Optional "Save to Catalogue" button for community contributions.
+
+### 2. Comprehensive Test Coverage for Image Scenarios
+- [x] **Implemented `tests/test_automated_scanner.py` covering all 5 key scenarios**:
+  1. *Scenario 1: Clear image with ingredients & nutrition* — Complete NutriLens score (0–100), positive/attention factors, recognized ingredients, and suitability.
+  2. *Scenario 2: Ingredients only* — Score marked explicitly as unavailable (never zero), ingredient intelligence and suitability fully evaluated.
+  3. *Scenario 3: Nutrition table only* — Score calculated, ingredient analysis marked explicitly unavailable, suitability reports missing ingredients uncertainty.
+  4. *Scenario 4: Blurry / low quality image* — Low confidence handled gracefully, uncertainty flags populated, no 500 crash.
+  5. *Scenario 5: Incomplete nutritional values* — Missing critical fields honestly reported as `insufficient_data` without fabricating numbers.
+  6. *Scenario 6: Product name independence* — Works seamlessly with missing product names (`"Unknown Product"`).
+  7. *Scenario 7: Post-analysis editing* — Real-time re-analysis updates score and suitability upon correction.
+- [x] All 22 scanner tests pass in 36 seconds (`pytest nutrilens/backend/tests/test_automated_scanner.py nutrilens/backend/tests/test_scanner.py -v`).
 
 ---
 

@@ -227,6 +227,83 @@ export interface ExtractedProductData {
   is_verified: boolean;
 }
 
+export interface IngredientIntelItem {
+  name: string;
+  original_text: string;
+  category: string;
+  purpose: string;
+  concern_level: "safe" | "moderate" | "high" | "unknown" | string;
+  ins_number?: string | null;
+  is_common_allergen?: boolean;
+  source_reference?: string | null;
+}
+
+export interface IngredientIntelConcern {
+  ingredient: string;
+  concern_level: string;
+  is_common_allergen: boolean;
+  note: string;
+}
+
+export interface IngredientIntelligence {
+  is_available: boolean;
+  message?: string | null;
+  total_count: number;
+  recognized_count: number;
+  unrecognized_count: number;
+  recognized: IngredientIntelItem[];
+  unrecognized: Array<{ name: string; original_text: string; category: string; purpose: string; concern_level: string }>;
+  concerns: IngredientIntelConcern[];
+}
+
+export interface ScanAnalysisResult {
+  product_name: string;
+  brand?: string | null;
+  category?: string | null;
+  serving_size?: string | null;
+  scan_timestamp: string;
+  nutrition_analysis: NutritionAnalysis & {
+    is_available?: boolean;
+    message?: string | null;
+  };
+  ingredient_intelligence: IngredientIntelligence;
+  suitability_analysis: PersonalSuitabilityResult & {
+    is_personalized?: boolean;
+    guest_notice?: string | null;
+  };
+  data_quality: {
+    ocr_confidence: number;
+    ocr_engine: string;
+    uncertainty_flags: string[];
+    is_verified: boolean;
+    disclaimer: string;
+  };
+}
+
+export interface ScanHistoryItem {
+  id: string;
+  product_name: string;
+  brand?: string | null;
+  category?: string | null;
+  created_at?: string | null;
+  status: string;
+  score?: number | null;
+  grade?: string | null;
+  rating_label?: string | null;
+  rating_color?: string | null;
+  image_url?: string | null;
+  ocr_confidence: number;
+  ocr_engine: string;
+  is_scoreable: boolean;
+}
+
+export interface ScanHistoryResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  items: ScanHistoryItem[];
+}
+
 export interface ScanSession {
   id: string;
   status: "uploaded" | "processing" | "extracted" | "corrected" | "confirmed" | "failed" | string;
@@ -235,6 +312,7 @@ export interface ScanSession {
   extracted_data?: ExtractedProductData | null;
   corrected_data?: Partial<ExtractedProductData> | null;
   product_id?: string | null;
+  analysis?: ScanAnalysisResult | null;
   created_at?: string;
   updated_at?: string;
 }
