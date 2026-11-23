@@ -540,8 +540,8 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
     if facts["saturated_fat_g"] is None:
         facts["saturated_fat_g"] = _extract_number(
             [
-                r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|sat\s+fat|[a-z]*ated\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-                r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|[a-z]*ated\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|sat\s+fat|[a-z]*urated\s+fat|[a-z]*ated\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]]?)?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|[a-z]*urated\s+fat|[a-z]*ated\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
             ],
             text,
         )
@@ -596,8 +596,8 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
     if facts["carbohydrates_g"] is None:
         facts["carbohydrates_g"] = _extract_number(
             [
-                r"(?:carbohydrates?|total\s+carbohydrates?|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-                r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:carbohydrates?|total\s+carbohydrates?|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate)s?)(?:\s*[\(\[]\s*g\s*[\)\]]?)?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate)s?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
             ],
             text,
         )
@@ -606,8 +606,8 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
     if facts["added_sugar_g"] is None:
         facts["added_sugar_g"] = _extract_number(
             [
-                r"(?:added\s*sugars?|of\s+which\s+added\s+sugars?|[a-z]*ed\s*sugars?|\.dsugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-                r"(?:added\s*sugars?|[a-z]*ed\s*sugars?|\.dsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:added\s*sugars?|of\s+which\s+added\s+sugars?|[a-z]*ed\s*sugars?|\.dsugars?|[a-z]?dsugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:added\s*sugars?|[a-z]*ed\s*sugars?|\.dsugars?|[a-z]?dsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
             ],
             text,
         )
@@ -616,9 +616,9 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
     if facts["total_sugar_g"] is None:
         facts["total_sugar_g"] = _extract_number(
             [
-                r"(?:total\s+sugars?|of\s+which\s+sugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:total\s+sugars?|of\s+which\s+sugars?|[a-z]?lsugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
                 r"(?<!added\s)(?<!jed\s)(?<!\.d)(?<![a-z]ed\s)\bsugars?(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-                r"(?:total\s+sugars?|of\s+which\s+sugars?|(?<!added\s)(?<!jed\s)(?<!\.d)(?<![a-z]ed\s)\bsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:total\s+sugars?|of\s+which\s+sugars?|[a-z]?lsugars?|(?<!added\s)(?<!jed\s)(?<!\.d)(?<![a-z]ed\s)\bsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
             ],
             text,
         )
@@ -627,8 +627,8 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
     if facts["dietary_fibre_g"] is None:
         facts["dietary_fibre_g"] = _extract_number(
             [
-                r"(?:dietary\s+fib(?:re|er)|crude\s+fib(?:re|er)|fib(?:re|er)|[a-z]*ary\s+fib(?:re|er))(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-                r"(?:dietary\s+fib(?:re|er)|fib(?:re|er)|[a-z]*ary\s+fib(?:re|er))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:dietary\s+fib(?:re|er)|crude\s+fib(?:re|er)|fib(?:re|er)|[a-z]*ary\s*fib(?:re|er)|[a-z]*fib(?:re|er))(?:\s*[\(\[]\s*g\s*[\)\]]?)?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:dietary\s+fib(?:re|er)|fib(?:re|er)|[a-z]*ary\s*fib(?:re|er)|[a-z]*fib(?:re|er))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
             ],
             text,
         )
@@ -655,8 +655,8 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
     if facts["sodium_mg"] is None:
         sodium_val = _extract_number(
             [
-                r"(?:sodium|[a-z]*dium)(?:\s*[\(\[]\s*(?:mg|g)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:mg)?",
-                r"(?:sodium|[a-z]*dium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
+                r"(?:sodium|[a-z]*dium)(?:\s*[\(\[]\s*(?:mg|g|mq)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:mg|mq)?",
+                r"(?:sodium|[a-z]*dium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg|mq)?",
             ],
             text,
         )
@@ -666,7 +666,7 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
                 sodium_val = sodium_val * 1000.0
             facts["sodium_mg"] = sodium_val
         else:
-            mg_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*mg\b", text, re.IGNORECASE)
+            mg_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*(?:mg|mq)\b", text, re.IGNORECASE)
             if mg_match:
                 try:
                     facts["sodium_mg"] = float(mg_match.group(1).replace(",", "."))
@@ -675,13 +675,13 @@ def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) ->
             if facts["sodium_mg"] is None:
                 salt_val = _extract_number(
                     [
-                        r"(?:salt)(?:\s*[\(\[]\s*(?:g|mg)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|mg\b)?",
-                        r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|mg\b)?",
+                        r"(?:total\s+salt|salt|[a-z]*salt)(?:\s*[\(\[]\s*(?:g|mg)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|mg\b)?",
+                        r"(?:total\s+salt|salt|[a-z]*salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|mg\b)?",
                     ],
                     text,
                 )
                 if salt_val is not None:
-                    m_salt_mg = re.search(r"(?:salt)(?:\s*[\(\[]\s*mg\s*[\)\]]|[\s:\-–—\t]*[0-9]+(?:\.[0-9]+)?\s*mg\b)", text, re.IGNORECASE)
+                    m_salt_mg = re.search(r"(?:total\s+salt|salt|[a-z]*salt)(?:\s*[\(\[]\s*mg\s*[\)\]]|[\s:\-–—\t]*[0-9]+(?:\.[0-9]+)?\s*mg\b)", text, re.IGNORECASE)
                     if m_salt_mg:
                         facts["sodium_mg"] = round(salt_val * 0.4, 2)
                     elif salt_val <= 15.0:
