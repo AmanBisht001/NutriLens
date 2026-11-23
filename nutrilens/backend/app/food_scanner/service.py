@@ -332,6 +332,15 @@ def run_scan_analysis(
         else:
             nutrition_analysis["is_available"] = True
 
+        # Augment per-serving values with directly declared label values if available
+        per_serving_facts = extracted_data.get("per_serving_nutrition_facts") or {}
+        if per_serving_facts:
+            existing_serv = nutrition_analysis.get("per_serving_values") or {}
+            for sk, sv in per_serving_facts.items():
+                if sv is not None and existing_serv.get(sk) is None:
+                    existing_serv[sk] = sv
+            nutrition_analysis["per_serving_values"] = existing_serv
+
     # 3. Personalized Dietary Suitability
     user_pref = "None"
     user_allergies: List[str] = []
@@ -481,6 +490,7 @@ async def process_scan_upload(
     images_meta: List[Dict[str, Any]] = []
     ocr_raw_sections: List[str] = []
     confidences: List[float] = []
+    all_ocr_lines: List[Any] = []
     total_prep_ms = 0.0
     total_ocr_ms = 0.0
     total_vis_ms = 0.0
@@ -601,9 +611,14 @@ async def process_scan_upload(
             for idx_l, line in enumerate(ocr_res.lines[:20]):
                 logger.info(f"[SCAN_DEBUG_LINE] {idx_l+1:02d}: [{line.confidence:.2f}] {line.text}")
 
+            if ocr_res.lines:
+                all_ocr_lines.extend(ocr_res.lines)
+
             if ocr_res.raw_text:
                 header = f"--- [{ltype.upper()} LABEL] ---"
                 ocr_raw_sections.append(f"{header}\n{ocr_res.raw_text}")
+                confidences.append(ocr_res.confidence)
+            elif ocr_res.confidence > 0.0:
                 confidences.append(ocr_res.confidence)
 
             # Clean up intermediate numpy arrays and byte buffers
@@ -621,6 +636,7 @@ async def process_scan_upload(
             raw_ocr_text=combined_raw_text,
             ocr_confidence=avg_confidence,
             ocr_engine=engine.__class__.__name__.lower().replace("engine", ""),
+            ocr_lines=all_ocr_lines if all_ocr_lines else None,
         )
 
         # 5b. Multimodal Vision Fallback / Complementary check

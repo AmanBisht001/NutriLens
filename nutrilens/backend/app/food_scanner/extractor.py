@@ -90,7 +90,9 @@ def extract_product_name(text: str, detected_brand: Optional[str] = None) -> Opt
         # If inside ingredients or nutrition block, skip
         if in_ingredients or in_nutrition:
             continue
-        # Skip generic section headers or nutrient names
+        # Skip generic section headers or nutrient names (including truncated OCR like 'itional facts', 'ervings')
+        if re.search(r"\b(?:facts|nutrition|[a-z]*tional\s+facts|approx|values|[a-z]*ervings?|per\s*(?:pack|[0-9]+)|pack:\s*\d+|ingredients?|allergen|batch|mfg|exp|mrp)\b", line, re.IGNORECASE):
+            continue
         if re.match(r"^(nutrition facts|nutrition information|ingredients|contains|allergen|net wt|batch|mfg|exp|mrp|energy|fat|carbohydrate|sugar|protein|sodium|serving|per\b)", line, re.IGNORECASE):
             continue
         # Skip pure brand line if identical
@@ -118,7 +120,7 @@ def extract_serving_size(text: str) -> Optional[str]:
     'Serving Size: 30g', 'Serve Size20g*', 'Serve Size 20g', 'Per serve (25g)', 'Per 100g', etc.
     """
     patterns = [
-        r"(?:serving\s*size|portion\s*size|per\s*serve|serve\s*size)[:\s*]*([0-9]+(?:\.[0-9]+)?\s*(?:g|ml|oz|piece|pieces|biscuit|biscuits|slice|slices)[^,\n\.]*)",
+        r"(?:serving\s*size|portion\s*size|per\s*serve|serve\s*size|\bsize)[:\s*]*([0-9]+(?:\.[0-9]+)?\s*(?:g|ml|oz|piece|pieces|biscuit|biscuits|slice|slices))\b",
         r"(?:approx\.\s*)?([0-9]+(?:\.[0-9]+)?\s*(?:g|ml)\s*\([^)]+\))",
         r"(?:per\s+serving\s*\(([^)]+)\))",
     ]
@@ -236,15 +238,178 @@ def _extract_number(patterns: Union[str, List[str]], text: str) -> Optional[floa
     return None
 
 
-def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
+def _get_line_info(l: Any) -> Optional[Dict[str, Any]]:
+    """Helper to extract text and geometry from an OCRLine or dict."""
+    if isinstance(l, dict):
+        text = str(l.get("text", "")).strip()
+        box = l.get("box")
+        conf = float(l.get("confidence", 0.0))
+    else:
+        text = str(getattr(l, "text", "")).strip()
+        box = getattr(l, "box", None)
+        conf = float(getattr(l, "confidence", 0.0))
+
+    if not text or not box or len(box) < 4:
+        return None
+    try:
+        xmin = min(p[0] for p in box)
+        xmax = max(p[0] for p in box)
+        ymin = min(p[1] for p in box)
+        ymax = max(p[1] for p in box)
+        xc = (xmin + xmax) / 2.0
+        yc = (ymin + ymax) / 2.0
+        h_box = ymax - ymin
+        return {
+            "text": text,
+            "xmin": xmin, "xmax": xmax,
+            "ymin": ymin, "ymax": ymax,
+            "xc": xc, "yc": yc, "h": h_box,
+            "conf": conf,
+        }
+    except Exception:
+        return None
+
+
+def extract_nutrition_facts_spatial(
+    ocr_lines: List[Any],
+) -> Tuple[Dict[str, Optional[float]], Dict[str, Optional[float]]]:
+    """
+    2D Spatial Table Extractor.
+    Extracts nutrient values from multi-column nutrition facts tables using
+    bounding-box geometric relationships and camera tilt estimation.
+    Returns: (per_100_facts, per_serving_facts)
+    """
+    per_100_facts: Dict[str, Optional[float]] = {
+        "energy_kcal": None,
+        "total_fat_g": None,
+        "saturated_fat_g": None,
+        "trans_fat_g": None,
+        "carbohydrates_g": None,
+        "total_sugar_g": None,
+        "added_sugar_g": None,
+        "dietary_fibre_g": None,
+        "protein_g": None,
+        "sodium_mg": None,
+    }
+    per_serving_facts: Dict[str, Optional[float]] = {k: None for k in per_100_facts}
+
+    items = []
+    for l in ocr_lines:
+        info = _get_line_info(l)
+        if info:
+            items.append(info)
+
+    if len(items) < 2:
+        return per_100_facts, per_serving_facts
+
+    # Estimate median camera tilt slope across horizontal text pairs
+    slopes = []
+    for i in range(len(items)):
+        for j in range(len(items)):
+            if i == j:
+                continue
+            dx = items[j]['xc'] - items[i]['xc']
+            dy = items[j]['yc'] - items[i]['yc']
+            if 40 <= dx <= 250 and abs(dy) <= 30:
+                slopes.append(dy / dx)
+
+    tilt_slope = 0.0
+    if slopes:
+        slopes.sort()
+        tilt_slope = slopes[len(slopes) // 2]
+        tilt_slope = max(-0.3, min(0.3, tilt_slope))
+
+    targets = [
+        ("energy_kcal", [r"(?:energy|calories|\(kcal\)|kcal\b)"]),
+        ("protein_g", [r"(?:protein|crude\s+protein|\bN\s*\(g\)|\btein\s*\(g\))"]),
+        ("carbohydrates_g", [r"(?:carbohydrate|carbs|hydrates?\s*\(g\)|[a-z]*ydrate)"]),
+        ("total_sugar_g", [r"(?:total\s+sugars?|sugars?\s*\(g\)|(?<!added\s)(?<!\.d)sugars?)"]),
+        ("added_sugar_g", [r"(?:added\s+sugars?|\.dsugars?|ed\s*sugars?)"]),
+        ("dietary_fibre_g", [r"(?:dietary\s+fib|fibre?\s*\(g\)|fib(?:re|er)|ary\s+fibre)"]),
+        ("total_fat_g", [r"(?:total\s+fat|crude\s+fat|\blfat\s*\(g\)|\bfat\s*\(g\))"]),
+        ("saturated_fat_g", [r"(?:saturated\s+fat|urated\s+fat|sat\s+fat)"]),
+        ("trans_fat_g", [r"(?:trans\s+fat|ansfat)"]),
+        ("cholesterol_mg", [r"(?:cholesterol|olesterol)"]),
+        ("salt_g", [r"(?:total\s+salt|alsalt|salt\b)"]),
+        ("sodium_mg", [r"(?:sodium|dium\s*\(mg\))"]),
+    ]
+
+    extracted_salt_100 = None
+    extracted_salt_serv = None
+
+    for key, patterns in targets:
+        matched_label = None
+        for item in items:
+            if key == "total_fat_g" and any(re.search(r"saturated|urated|trans|ans", item['text'], re.I) for _ in [1]):
+                continue
+            if key == "total_sugar_g" and any(re.search(r"added|\.d|ed\s*sugar", item['text'], re.I) for _ in [1]):
+                continue
+            if key == "salt_g" and any(re.search(r"dium", item['text'], re.I) for _ in [1]):
+                continue
+
+            for pat in patterns:
+                if re.search(pat, item['text'], re.I):
+                    matched_label = item
+                    break
+            if matched_label:
+                break
+
+        if not matched_label:
+            continue
+
+        candidates = []
+        for item in items:
+            if item == matched_label:
+                continue
+            if item['xmin'] < matched_label['xmax'] - 10:
+                continue
+
+            expected_y = matched_label['yc'] + tilt_slope * (item['xc'] - matched_label['xc'])
+            v_dist = abs(item['yc'] - expected_y)
+
+            if v_dist <= 14.0:
+                m = re.search(r"^[<>]?([0-9]+(?:[\.,][0-9]+)?)\.?$", item['text'])
+                if m:
+                    val = float(m.group(1).replace(",", "."))
+                    candidates.append((item['xmin'], val, v_dist))
+
+        candidates.sort(key=lambda c: c[0])
+        if candidates:
+            c1_val = candidates[0][1]
+            c2_val = candidates[1][1] if len(candidates) > 1 else None
+            if key == "salt_g":
+                extracted_salt_100 = c1_val
+                extracted_salt_serv = c2_val
+            elif key != "cholesterol_mg":
+                per_100_facts[key] = c1_val
+                per_serving_facts[key] = c2_val
+
+    # Convert salt to sodium if sodium was not directly detected
+    if per_100_facts.get("sodium_mg") is None and extracted_salt_100 is not None:
+        if extracted_salt_100 <= 15.0:
+            per_100_facts["sodium_mg"] = round(extracted_salt_100 * 400.0, 2)
+        else:
+            per_100_facts["sodium_mg"] = round(extracted_salt_100, 2)
+
+    if per_serving_facts.get("sodium_mg") is None and extracted_salt_serv is not None:
+        if extracted_salt_serv <= 15.0:
+            per_serving_facts["sodium_mg"] = round(extracted_salt_serv * 400.0, 2)
+        else:
+            per_serving_facts["sodium_mg"] = round(extracted_salt_serv, 2)
+
+    return per_100_facts, per_serving_facts
+
+
+def extract_nutrition_facts(text: str, ocr_lines: Optional[List[Any]] = None) -> Dict[str, Optional[float]]:
     """
     Extracts key macronutrients from nutrition facts text.
     Handles:
+    - 2D spatial table alignment when ocr_lines are available
     - Single-line (e.g. 'Energy: 460 kcal', 'Energy (kcal) 554')
     - Multi-line table rows (e.g. 'Energy (kcal)\\n554')
     - Units inside parentheses or brackets in label names (e.g. 'Total Fat (g)', 'Sodium [mg]')
     - Multi-column tables (e.g. 'Energy (kcal) 554 111' -> extracts 554 per 100g)
-    - Indian packaging misreads (e.g. 'ydrate', 'ated Fat', 'ans Fat', 'JedSugars')
+    - Indian packaging misreads (e.g. 'ydrate', 'ated Fat', 'ans Fat', 'JedSugars', 'N(g)')
     - UK/EU formats ('of which saturates', 'of which sugars', 'Salt' converted to sodium)
     - Standalone unit deduction (e.g. solitary '554 kcal' -> Energy, '694 mg' -> Sodium)
     """
@@ -261,22 +426,31 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
         "sodium_mg": None,
     }
 
+    # 0. Spatial table extraction (highest fidelity for multi-column grids)
+    if ocr_lines:
+        spatial_100, _ = extract_nutrition_facts_spatial(ocr_lines)
+        for k, v in spatial_100.items():
+            if v is not None:
+                facts[k] = v
+
     # 1. Energy / Calories (kcal or kJ/kcal split e.g. '2110 kJ / 504 kcal')
-    split_energy = re.search(
-        r"(?:energy|calories|energy\s+value)[^\n\d]*\d+\s*(?:kj)?\s*/\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kcal|cal)?",
-        text,
-        re.IGNORECASE,
-    )
-    if split_energy:
-        try:
-            facts["energy_kcal"] = float(split_energy.group(1).replace(",", "."))
-        except ValueError:
-            pass
+    if facts["energy_kcal"] is None:
+        split_energy = re.search(
+            r"(?:energy|calories|energy\s+value)[^\n\d]*\d+\s*(?:kj)?\s*/\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kcal|cal)?",
+            text,
+            re.IGNORECASE,
+        )
+        if split_energy:
+            try:
+                facts["energy_kcal"] = float(split_energy.group(1).replace(",", "."))
+            except ValueError:
+                pass
 
     if facts["energy_kcal"] is None:
         facts["energy_kcal"] = _extract_number(
             [
                 r"(?:energy|calories|energy\s+value|caloric\s+value)(?:\s*[\(\[]\s*(?:kcal|kj|cal)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)(?:\s*(?:kcal|cal))?",
+                r"(?:^|\n)[ \t]*(?:\(kcal\)|kcal)[ \t]+([0-9]+(?:[\.,][0-9]+)?)",
                 r"(?:energy|calories)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:kcal|cal)?",
             ],
             text,
@@ -292,22 +466,24 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
                 pass
 
     # 2. Saturated Fat (checked before Total Fat to prevent overlap)
-    facts["saturated_fat_g"] = _extract_number(
-        [
-            r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|sat\s+fat|[a-z]*ated\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|[a-z]*ated\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["saturated_fat_g"] is None:
+        facts["saturated_fat_g"] = _extract_number(
+            [
+                r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|sat\s+fat|[a-z]*ated\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:saturated\s+fat|saturated\s+fatty\s+acids|of\s+which\s+saturates|saturates|[a-z]*ated\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
 
     # 3. Trans Fat
-    facts["trans_fat_g"] = _extract_number(
-        [
-            r"(?:trans\s+fat|trans\s+fatty\s+acids|of\s+which\s+trans|transfat|[a-z]*ans\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:trans\s+fat|trans\s+fatty\s+acids|[a-z]*ans\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["trans_fat_g"] is None:
+        facts["trans_fat_g"] = _extract_number(
+            [
+                r"(?:trans\s+fat|trans\s+fatty\s+acids|of\s+which\s+trans|transfat|[a-z]*ans\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:trans\s+fat|trans\s+fatty\s+acids|[a-z]*ans\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
     if facts["trans_fat_g"] is None and facts["saturated_fat_g"] is not None:
         post_sat_trans = re.search(r"(?:ated|saturated)\s+fat[\s\S]*?\bFat[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b)", text, re.IGNORECASE)
         if post_sat_trans:
@@ -317,21 +493,19 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
                 pass
 
     # 4. Total Fat (find "Total Fat" or standalone "Fat", avoiding Saturated or Trans)
-    # NOTE: truncated-OCR pattern must come FIRST to avoid matching Trans Fat "Fat 0.1g" label.
-    # On cropped Indian food labels, "Total Fat" is often truncated to "It" or just "Fat" at line start.
-    facts["total_fat_g"] = _extract_number(
-        [
-            # Specific "Total Fat" label — highest priority
-            r"(?:total\s+fat|crude\s+fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            # Truncated OCR: line containing only 'It', 'it', 'Fat', or similar followed by value on next line
-            # This handles cropped labels where "Fat" or "Total Fat" gets cut to "It" at line boundary
-            r"^[ \t]*(?:[a-z]{0,2}[Ii]t|[Tt]otal\s+[Ff]at)[ \t]*$\n[ \t]*([0-9]+(?:\.[0-9]+)?)[ \t]*g\b",
-            # Generic standalone "Fat" — lowest priority (also matches Trans Fat label row)
-            r"(?<!saturated\s)(?<!ated\s)(?<!trans\s)(?<!ans\s)\bfat(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:total\s+fat|(?<!saturated\s)(?<!ated\s)(?<!trans\s)(?<!ans\s)\bfat|crude\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["total_fat_g"] is None:
+        facts["total_fat_g"] = _extract_number(
+            [
+                # Specific "Total Fat" label — highest priority
+                r"(?:total\s+fat|crude\s+fat|[a-z]?l\s*fat)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                # Truncated OCR: line containing only 'It', 'it', 'Fat', or similar followed by value on next line
+                r"^[ \t]*(?:[a-z]{0,2}[Ii]t|[Tt]otal\s+[Ff]at)[ \t]*$\n[ \t]*([0-9]+(?:\.[0-9]+)?)[ \t]*g\b",
+                # Generic standalone "Fat" — lowest priority (also matches Trans Fat label row)
+                r"(?<!saturated\s)(?<!ated\s)(?<!trans\s)(?<!ans\s)\bfat(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:total\s+fat|(?<!saturated\s)(?<!ated\s)(?<!trans\s)(?<!ans\s)\bfat|crude\s+fat)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
 
     # Re-validate Total Fat does not duplicate Saturated or Trans Fat
     if facts["total_fat_g"] is not None:
@@ -348,53 +522,58 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
                 pass
 
     # 5. Carbohydrates (handles 'carbohydrates', 'carbs', and truncated 'ydrate')
-    facts["carbohydrates_g"] = _extract_number(
-        [
-            r"(?:carbohydrates?|total\s+carbohydrates?|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["carbohydrates_g"] is None:
+        facts["carbohydrates_g"] = _extract_number(
+            [
+                r"(?:carbohydrates?|total\s+carbohydrates?|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:carbohydrate|carbohydrates|total\s+carbohydrates|total\s+carbs|carbs|[a-z]*(?:hydrate|ydrate))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
 
     # 6. Added Sugars (checked before Total Sugars to prevent Added Sugars from being captured as Total)
-    facts["added_sugar_g"] = _extract_number(
-        [
-            r"(?:added\s*sugars?|of\s+which\s+added\s+sugars?|[a-z]*ed\s*sugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:added\s*sugars?|[a-z]*ed\s*sugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["added_sugar_g"] is None:
+        facts["added_sugar_g"] = _extract_number(
+            [
+                r"(?:added\s*sugars?|of\s+which\s+added\s+sugars?|[a-z]*ed\s*sugars?|\.dsugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:added\s*sugars?|[a-z]*ed\s*sugars?|\.dsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
 
     # 7. Total Sugars / 'of which sugars'
-    facts["total_sugar_g"] = _extract_number(
-        [
-            r"(?:total\s+sugars?|of\s+which\s+sugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?<!added\s)(?<!jed\s)(?<![a-z]ed\s)\bsugars?(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:total\s+sugars?|of\s+which\s+sugars?|(?<!added\s)(?<!jed\s)(?<![a-z]ed\s)\bsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["total_sugar_g"] is None:
+        facts["total_sugar_g"] = _extract_number(
+            [
+                r"(?:total\s+sugars?|of\s+which\s+sugars?)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?<!added\s)(?<!jed\s)(?<!\.d)(?<![a-z]ed\s)\bsugars?(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:total\s+sugars?|of\s+which\s+sugars?|(?<!added\s)(?<!jed\s)(?<!\.d)(?<![a-z]ed\s)\bsugars?)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
 
     # 8. Dietary Fibre / Fibre / Fiber
-    facts["dietary_fibre_g"] = _extract_number(
-        [
-            r"(?:dietary\s+fib(?:re|er)|crude\s+fib(?:re|er)|fib(?:re|er))(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:dietary\s+fib(?:re|er)|fib(?:re|er))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["dietary_fibre_g"] is None:
+        facts["dietary_fibre_g"] = _extract_number(
+            [
+                r"(?:dietary\s+fib(?:re|er)|crude\s+fib(?:re|er)|fib(?:re|er)|[a-z]*ary\s+fib(?:re|er))(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:dietary\s+fib(?:re|er)|fib(?:re|er)|[a-z]*ary\s+fib(?:re|er))[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
 
     # 9. Protein
-    facts["protein_g"] = _extract_number(
-        [
-            r"(?:protein|crude\s+protein)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
-            r"(?:protein|crude\s+protein)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
-        ],
-        text,
-    )
+    if facts["protein_g"] is None:
+        facts["protein_g"] = _extract_number(
+            [
+                r"(?:protein|crude\s+protein|[a-z]*tein|\bN)(?:\s*[\(\[]\s*g\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|go\b|\s)",
+                r"(?:protein|crude\s+protein|[a-z]*tein)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|go\b|\s)",
+            ],
+            text,
+        )
     # Positional check: in standard Indian nutrition tables, Protein is the row between Energy (kcal) and Carbohydrate
     if facts["protein_g"] is None:
-        table_protein = re.search(r"kcal[\s\S]*?\b([0-9]+(?:\.[0-9]+)?)\s*g\b[\s\S]*?[a-z]*(?:hydrate|ydrate)", text, re.IGNORECASE)
+        table_protein = re.search(r"kcal[\s\S]*?(?<!size:)(?<!size\s)\b([0-9]+(?:\.[0-9]+)?)\s*g\b[\s\S]*?[a-z]*(?:hydrate|ydrate)", text, re.IGNORECASE)
         if table_protein:
             try:
                 facts["protein_g"] = float(table_protein.group(1).replace(",", "."))
@@ -402,43 +581,42 @@ def extract_nutrition_facts(text: str) -> Dict[str, Optional[float]]:
                 pass
 
     # 10. Sodium (mg or g) or Salt (g converted: 1g salt ≈ 400mg sodium)
-    sodium_val = _extract_number(
-        [
-            r"(?:sodium|[a-z]*dium)(?:\s*[\(\[]\s*(?:mg|g)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:mg)?",
-            r"(?:sodium|[a-z]*dium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
-        ],
-        text,
-    )
-    if sodium_val is not None:
-        # Check if unit was grams
-        m_g = re.search(r"(?:sodium|[a-z]*dium)(?:\s*[\(\[]\s*g\s*[\)\]]|[\s:\-–—\t]*[0-9]+(?:[\.,][0-9]+)?\s*g\b)", text, re.IGNORECASE)
-        if m_g:
-            sodium_val = sodium_val * 1000.0  # Convert grams to mg
-        facts["sodium_mg"] = sodium_val
-    else:
-        # Check for standalone mg in table
-        mg_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*mg\b", text, re.IGNORECASE)
-        if mg_match:
-            try:
-                facts["sodium_mg"] = float(mg_match.group(1).replace(",", "."))
-            except ValueError:
-                pass
-        # Check for Salt declaration (common on Indian and UK packaged goods)
-        if facts["sodium_mg"] is None:
-            salt_val = _extract_number(
-                [
-                    r"(?:salt)(?:\s*[\(\[]\s*(?:g|mg)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|mg\b)?",
-                    r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|mg\b)?",
-                ],
-                text,
-            )
-            if salt_val is not None:
-                # If declared in grams (standard on food labels), convert to sodium in mg: 1g salt = 400mg sodium
-                m_salt_mg = re.search(r"(?:salt)(?:\s*[\(\[]\s*mg\s*[\)\]]|[\s:\-–—\t]*[0-9]+(?:\.[0-9]+)?\s*mg\b)", text, re.IGNORECASE)
-                if m_salt_mg:
-                    facts["sodium_mg"] = round(salt_val * 0.4, 2)
-                else:
-                    facts["sodium_mg"] = round(salt_val * 400.0, 2)
+    if facts["sodium_mg"] is None:
+        sodium_val = _extract_number(
+            [
+                r"(?:sodium|[a-z]*dium)(?:\s*[\(\[]\s*(?:mg|g)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:mg)?",
+                r"(?:sodium|[a-z]*dium)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:mg)?",
+            ],
+            text,
+        )
+        if sodium_val is not None:
+            m_g = re.search(r"(?:sodium|[a-z]*dium)(?:\s*[\(\[]\s*g\s*[\)\]]|[\s:\-–—\t]*[0-9]+(?:[\.,][0-9]+)?\s*g\b)", text, re.IGNORECASE)
+            if m_g:
+                sodium_val = sodium_val * 1000.0
+            facts["sodium_mg"] = sodium_val
+        else:
+            mg_match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*mg\b", text, re.IGNORECASE)
+            if mg_match:
+                try:
+                    facts["sodium_mg"] = float(mg_match.group(1).replace(",", "."))
+                except ValueError:
+                    pass
+            if facts["sodium_mg"] is None:
+                salt_val = _extract_number(
+                    [
+                        r"(?:salt)(?:\s*[\(\[]\s*(?:g|mg)\s*[\)\]])?[\s:\-–—\t]*\n?[\s:\-–—\t]*([0-9]+(?:[\.,][0-9]+)?)\s*(?:g\b|mg\b)?",
+                        r"(?:salt)[\s:\-]+([0-9]+(?:\.[0-9]+)?)\s*(?:g\b|mg\b)?",
+                    ],
+                    text,
+                )
+                if salt_val is not None:
+                    m_salt_mg = re.search(r"(?:salt)(?:\s*[\(\[]\s*mg\s*[\)\]]|[\s:\-–—\t]*[0-9]+(?:\.[0-9]+)?\s*mg\b)", text, re.IGNORECASE)
+                    if m_salt_mg:
+                        facts["sodium_mg"] = round(salt_val * 0.4, 2)
+                    elif salt_val <= 15.0:
+                        facts["sodium_mg"] = round(salt_val * 400.0, 2)
+                    else:
+                        facts["sodium_mg"] = round(salt_val, 2)
 
     return facts
 
@@ -486,6 +664,7 @@ def extract_structured_label_info(
     raw_ocr_text: str,
     ocr_confidence: float = 0.0,
     ocr_engine: str = "fallback",
+    ocr_lines: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """
     Master pipeline transforming raw OCR text into structured product data,
@@ -498,8 +677,19 @@ def extract_structured_label_info(
     brand = extract_brand(cleaned)
     product_name = extract_product_name(cleaned, detected_brand=brand)
     serving_size = extract_serving_size(cleaned)
+    if not serving_size:
+        # Check column header declarations like 'PER 50g' (avoiding 'PER 100g')
+        m_serv = re.search(r"\bper\s*([1-9][0-9]*(?:\.[0-9]+)?\s*(?:g|ml))\b", cleaned, re.IGNORECASE)
+        if m_serv and "100" not in m_serv.group(1):
+            serving_size = m_serv.group(1).strip()
+
     raw_ingredients_text, ingredients_list = extract_ingredients(cleaned)
-    nutrition_facts = extract_nutrition_facts(cleaned)
+    nutrition_facts = extract_nutrition_facts(cleaned, ocr_lines=ocr_lines)
+
+    per_serving_facts: Dict[str, Optional[float]] = {}
+    if ocr_lines:
+        _, per_serving_facts = extract_nutrition_facts_spatial(ocr_lines)
+
     declared_allergens, precautionary_allergens = extract_allergens(cleaned)
 
     # Uncertainty checks:
@@ -529,6 +719,7 @@ def extract_structured_label_info(
         "raw_ingredients_text": raw_ingredients_text,
         "ingredients": ingredients_list,
         "nutrition_facts": nutrition_facts,
+        "per_serving_nutrition_facts": per_serving_facts,
         "declared_allergens": declared_allergens,
         "precautionary_allergens": precautionary_allergens,
         "ocr_confidence": round(ocr_confidence, 4),

@@ -24,7 +24,7 @@ ALLOWED_MIME_TYPES = {
 }
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MIN_IMAGE_DIMENSION = 50  # Minimum 50x50 pixels
-MAX_PROCESSING_DIMENSION = 1600  # Raised from 1200: food label text needs higher resolution for OCR accuracy
+MAX_PROCESSING_DIMENSION = 960  # Capped at 960px to maintain sub-512MB RAM and sub-second OCR on cloud instances
 THUMBNAIL_MAX_DIMENSION = 320   # Fast lightweight thumbnail for dashboard preview
 
 

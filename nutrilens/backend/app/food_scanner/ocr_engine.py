@@ -239,13 +239,11 @@ class PaddleOCREngine(BaseOCREngine):
                 notes="Failed to decode image input.",
             )
 
-        # Ensure max dimension does not exceed 1600px.
-        # Food labels with small-text nutrition tables need higher resolution than 960px for
-        # accurate OCR — 960px was causing missed characters on dense Indian label text.
+        # Ensure max dimension does not exceed 960px to maintain sub-512MB RAM on cloud containers
         h, w = img_cv.shape[:2]
         max_dim = max(h, w)
-        if max_dim > 1600:
-            scale = 1600.0 / max_dim
+        if max_dim > 960:
+            scale = 960.0 / max_dim
             new_w, new_h = int(w * scale), int(h * scale)
             img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
             logger.debug(f"[OCR] Resized image to {new_w}x{new_h} for OCR.")
@@ -295,7 +293,66 @@ class PaddleOCREngine(BaseOCREngine):
                     notes=f"OCR Inference Error: {e}",
                 )
 
-        raw_text = "\n".join(line.text for line in ocr_lines)
+        # Spatially sort lines into reading order (top-to-bottom visual rows, left-to-right columns)
+        lines_with_pos = []
+        for line in ocr_lines:
+            if line.box and len(line.box) >= 4:
+                xmin = min(pt[0] for pt in line.box)
+                xmax = max(pt[0] for pt in line.box)
+                ymin = min(pt[1] for pt in line.box)
+                ymax = max(pt[1] for pt in line.box)
+                xc = (xmin + xmax) / 2.0
+                yc = (ymin + ymax) / 2.0
+                lines_with_pos.append((xc, yc, xmin, line))
+
+        spatially_sorted_lines = []
+        if lines_with_pos:
+            # Estimate median camera tilt slope across horizontal text pairs
+            slopes = []
+            for i in range(len(lines_with_pos)):
+                for j in range(len(lines_with_pos)):
+                    if i == j:
+                        continue
+                    dx = lines_with_pos[j][0] - lines_with_pos[i][0]
+                    dy = lines_with_pos[j][1] - lines_with_pos[i][1]
+                    if 40 <= dx <= 250 and abs(dy) <= 30:
+                        slopes.append(dy / dx)
+            tilt_slope = 0.0
+            if slopes:
+                slopes.sort()
+                tilt_slope = slopes[len(slopes) // 2]
+                tilt_slope = max(-0.3, min(0.3, tilt_slope))
+
+            # Adjust vertical position using tilt slope for planar row clustering
+            adjusted = []
+            for xc, yc, xmin, line in lines_with_pos:
+                y_adj = yc - tilt_slope * xc
+                adjusted.append((y_adj, xmin, line))
+            adjusted.sort(key=lambda item: item[0])
+
+            curr_cluster = []
+            curr_y = None
+            threshold = 12.0
+            for y_adj, xmin, line in adjusted:
+                if curr_y is None or abs(y_adj - curr_y) <= threshold:
+                    curr_cluster.append((xmin, line))
+                    if curr_y is None:
+                        curr_y = y_adj
+                else:
+                    curr_cluster.sort(key=lambda item: item[0])
+                    spatially_sorted_lines.append("  ".join(it[1].text for it in curr_cluster))
+                    curr_cluster = [(xmin, line)]
+                    curr_y = y_adj
+            if curr_cluster:
+                curr_cluster.sort(key=lambda item: item[0])
+                spatially_sorted_lines.append("  ".join(it[1].text for it in curr_cluster))
+
+        raw_stream = "\n".join(line.text for line in ocr_lines)
+        if spatially_sorted_lines:
+            raw_text = "\n".join(spatially_sorted_lines) + "\n\n" + raw_stream
+        else:
+            raw_text = raw_stream
+
         confidences = [line.confidence for line in ocr_lines]
         avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
 

@@ -32,9 +32,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database table initialization deferred (db offline or unreachable): {e}")
 
-    # Pre-warm PaddleOCR synchronously in a thread before accepting scan requests.
-    # This eliminates the 30-60 second cold-start delay that caused "Analysis is taking
-    # longer than expected" errors on the very first scan after server startup.
+    # Pre-warm PaddleOCR in a non-blocking background task.
+    # IMPORTANT: Do NOT await this before yield! Uvicorn must immediately bind to $PORT
+    # and answer /api/health with 200 OK so that Render/Cloud deployment health checks pass.
+    # Running this in the background ensures the server is live immediately and warms the OCR model.
+    async def _background_warmup():
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _load_and_warm_ocr_engine)
+        except Exception as exc:
+            logger.warning(f"Background OCR pre-warm error (non-fatal): {exc}")
+
     def _load_and_warm_ocr_engine():
         try:
             from app.food_scanner.ocr_engine import get_ocr_engine
@@ -51,13 +59,7 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning(f"OCR pre-warm failed (non-fatal, engine will lazy-init on first scan): {exc}")
 
-    # Run in a thread so it doesn't block the event loop, but await it so it finishes
-    # before the first request is accepted. This is the key fix for the cold-start timeout.
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _load_and_warm_ocr_engine)
-    except Exception as exc:
-        logger.warning(f"OCR pre-warm executor error (non-fatal): {exc}")
+    asyncio.create_task(_background_warmup())
 
     yield
 
