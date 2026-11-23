@@ -1186,9 +1186,25 @@ def get_scan_by_id(
                 detail="You do not have permission to access this scan record.",
             )
 
-    # Ensure analysis exists
+    # Ensure analysis exists and is complete (auto-upgrade old scans with Never-Blank scoring)
     target_data = scan.corrected_data if scan.corrected_data else scan.extracted_data
-    if target_data and not target_data.get("analysis"):
+    needs_reanalysis = False
+    if target_data:
+        curr_analysis = target_data.get("analysis")
+        if not curr_analysis:
+            needs_reanalysis = True
+        else:
+            nutr = curr_analysis.get("nutrition_analysis") or {}
+            ing = curr_analysis.get("ingredient_intelligence") or {}
+            suit = curr_analysis.get("suitability_analysis") or {}
+            if nutr.get("is_available") is False or nutr.get("score") is None:
+                needs_reanalysis = True
+            elif ing.get("is_available") is False or not ing.get("recognized"):
+                needs_reanalysis = True
+            elif "insufficient" in str(suit.get("status", "")).lower() or "insufficient" in str(suit.get("status_label", "")).lower():
+                needs_reanalysis = True
+
+    if target_data and needs_reanalysis:
         user = current_user
         if user is None and scan.user_id:
             user = db.query(User).filter(User.id == scan.user_id).first()
