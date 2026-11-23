@@ -230,8 +230,11 @@ export interface ExtractedProductData {
 export interface IngredientIntelItem {
   name: string;
   original_text: string;
+  extraction_status?: "Verified" | "AI-assisted" | "Estimated" | string;
   category: string;
   purpose: string;
+  explanation?: string;
+  observations?: string;
   concern_level: "safe" | "moderate" | "high" | "unknown" | string;
   ins_number?: string | null;
   is_common_allergen?: boolean;
@@ -245,6 +248,30 @@ export interface IngredientIntelConcern {
   note: string;
 }
 
+export interface ExtractionSummary {
+  level: "level_1_verified" | "level_2_ai_assisted" | "level_3_estimated" | "level_4_limited" | string;
+  level_label: string;
+  method: string;
+  overall_confidence: number;
+  total_detected: number;
+  verified_count: number;
+  ai_assisted_count: number;
+  estimated_count: number;
+  status_badge_color: string;
+}
+
+export interface ExtractionEvidence {
+  crop_url?: string | null;
+  raw_source_text?: string | null;
+  uncertain_words?: string[];
+}
+
+export interface ExtractionAllergenInfo {
+  declared: string[];
+  precautionary: string[];
+  uncertain: string[];
+}
+
 export interface IngredientIntelligence {
   is_available: boolean;
   message?: string | null;
@@ -252,8 +279,20 @@ export interface IngredientIntelligence {
   recognized_count: number;
   unrecognized_count: number;
   recognized: IngredientIntelItem[];
-  unrecognized: Array<{ name: string; original_text: string; category: string; purpose: string; concern_level: string }>;
+  unrecognized: Array<{
+    name: string;
+    original_text: string;
+    extraction_status?: string;
+    category: string;
+    purpose: string;
+    explanation?: string;
+    observations?: string;
+    concern_level: string;
+  }>;
   concerns: IngredientIntelConcern[];
+  extraction_summary?: ExtractionSummary;
+  evidence?: ExtractionEvidence;
+  allergen_information?: ExtractionAllergenInfo;
 }
 
 export interface ScanAnalysisResult {

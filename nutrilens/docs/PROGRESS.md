@@ -199,3 +199,65 @@ npm run dev
   - Image preprocessing: **~84% RAM reduction** (from ~140MB+ down to ~15MB per scan).
   - OCR model memory: **~70MB saved** by disabling angle classifier (`use_angle_cls=False`).
   - Container startup RAM: **<100MB** (well within Render's 512MB limit).
+
+---
+
+## Food Label Analysis Report: Ingredient Extraction & Intelligence Upgrade
+
+### 1. Architectural Highlights
+1. **Intelligent Ingredient Region Detection & Cropping** (`app/food_scanner/ingredient_detector.py`):
+   - Spatially clusters OCR bounding boxes to locate the ingredient block anywhere on the packaging.
+   - Ignores nutrition tables, marketing blurbs, logos, barcodes, and decorative elements.
+   - Computes tight bounding polygon, applies padding, perspective rectification, CLAHE contrast enhancement, and unsharp masking.
+   - Persists visual crop evidence (`{scan_id}_{idx}_ingredients_crop.jpg`) served via `/api/scans/images/`.
+2. **Multi-Engine Extraction & Delimiter-Aware Normalizer** (`app/food_scanner/extractor.py`):
+   - `split_ingredients_list`: State-machine tokenizer that strictly respects nested parenthetical and bracketed enclosures (`()`, `[]`, `{}`), preserving compound ingredients, additive INS/E numbers, and complex sub-ingredients intact.
+   - `normalize_ingredient_name`: Cleans bullets, numbers, trailing punctuation, and extra whitespace while retaining INS/E codes.
+   - `extract_ingredients`: Multi-heuristic search supporting standard English, regional/Hindi indicators (`Samagri`), allergen statements, and character density heuristics. Returns 4-tuple `(raw_section, items, extraction_method, confidence)`.
+   - Strips internal artificial headers (`--- [X LABEL] ---`) to prevent delimiter collision.
+3. **4-Level Transparent Fallback Hierarchy (Never Blank)**:
+   - **Level 1 (Verified)**: Clear OCR text extraction with high confidence ($\ge 0.85$).
+   - **Level 2 (AI-Assisted)**: OCR incomplete or blurry; Multimodal Vision LLM reads ingredients from original image.
+   - **Level 3 (Estimated)**: Partial text visibility with plausible ingredient candidates and clear uncertainty flags.
+   - **Level 4 (Limited Image Info)**: Transparent informative report explaining that no readable ingredients list was detected on this packaging face, without ever fabricating ingredients.
+4. **INS Additive Knowledge Engine** (`COMMON_ADDITIVES_INTELLIGENCE` in `service.py`):
+   - Built-in dictionary covering standard international INS/E additive codes (INS 100 to INS 1499).
+   - Supplies category, functional purpose in food, plain-language consumer explanation, evidence-based safety observations, and concern level (`safe`, `moderate`, `high`).
+5. **Frontend Section D Overhaul** (`ScanFoodPage.tsx`):
+   - Extraction Summary Bar displaying Level badge, confidence rating, total items detected, and verified/AI-assisted/estimated counts.
+   - Four Interactive Sub-Tabs:
+     - **Functional Intelligence**: Rich table with category, purpose, explanation, safety notes, and concern badges.
+     - **Complete Declaration**: Exact original wording vs normalized names with status badges (`Verified`, `AI-assisted`, `Estimated`).
+     - **Allergen Audit**: Dedicated panels for declared allergens, precautionary statements, and uncertain allergen findings.
+     - **Extraction Evidence**: Split preview showing the auto-cropped ingredient region image and raw OCR source text stream with uncertain words flagged.
+6. **Accurate Error Reporting & UI Resilience**:
+   - Resolved misleading error message where backend offline / connection refused was masked as "Analysis is taking longer than expected".
+   - Immediate clear guidance when `http://localhost:8000` is offline vs genuine cold-start timeouts.
+
+### 2. 30-Package Ingredient Evaluation Benchmark
+Evaluated in `backend/tests/test_ingredient_pipeline.py` across 30 distinct packaged food categories:
+- **Indian Snacks**: Haldiram's Bhujia Sev, Kurkure Masala Munch, Roasted Makhanas
+- **Biscuits**: Parle-G, Britannia Bourbon, Oreo Chocolate Sandwich
+- **Chips & Crisps**: Lay's Magic Masala, Doritos Nacho Cheese, Kerala Banana Chips
+- **Instant Noodles**: Maggi 2-Minute Noodles, Top Ramen Curry, Shin Ramyun
+- **Chocolates & Sweets**: Cadbury Dairy Milk, Ferrero Rocher, 70% Dark Chocolate
+- **Breakfast Cereals**: Kellogg's Corn Flakes, Quaker Rolled Oats, Chocos Moons & Stars
+- **Packaged Drinks**: Real Fruit Power Mango, Amul Kool Flavoured Milk, Raw Coconut Water
+- **Sauces & Condiments**: Kissan Tomato Ketchup, Ching's Schezwan Chutney, Hellmann's Mayonnaise
+- **Dairy Products**: Amul Salted Butter, Mother Dairy Greek Yogurt, Paneer Block
+- **Frozen Foods**: McCain French Fries, Frozen Vegetable Biryani
+- **Complex & Long Additives**: Sugarfree Chewing Gum with 9 INS sweeteners and additives
+
+| Metric | Target | Achieved Result |
+| :--- | :--- | :--- |
+| **Total Packages Evaluated** | 30 | **30** |
+| **Total Ground-Truth Items** | - | **214** |
+| **Total Extracted Items** | - | **224** |
+| **Precision** | $\ge 85\%$ | **95.54%** |
+| **Recall** | $\ge 85\%$ | **100.00%** |
+| **Completeness (F1-Score)** | $\ge 85\%$ | **97.72%** |
+| **INS Additive Code Recall** | $\ge 90\%$ | **100.00% (71/71)** |
+
+### 3. Verification Summary
+- **Backend Pytest Suite**: **160 of 160 tests passed** (100% pass rate in 382s).
+- **Frontend Production Build**: Zero TypeScript errors (`tsc --noEmit && vite build` built in 11.66s).

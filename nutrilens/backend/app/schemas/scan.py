@@ -36,9 +36,15 @@ class ExtractedProductData(BaseModel):
     serving_size: Optional[str] = None
     raw_ingredients_text: Optional[str] = None
     ingredients: List[str] = Field(default_factory=list)
+    ingredient_extraction_method: Optional[str] = None
+    ingredient_extraction_confidence: Optional[float] = None
+    ingredient_extraction_level: Optional[str] = None
+    ingredients_crop_url: Optional[str] = None
     nutrition_facts: NutritionFactsData = Field(default_factory=NutritionFactsData)
     declared_allergens: List[str] = Field(default_factory=list)
     precautionary_allergens: List[str] = Field(default_factory=list)
+    uncertain_allergens: List[str] = Field(default_factory=list)
+    uncertain_words: List[str] = Field(default_factory=list)
     ocr_confidence: float = 0.0
     ocr_engine: str = "fallback"
     uncertainty_flags: List[str] = Field(default_factory=list)

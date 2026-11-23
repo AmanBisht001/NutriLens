@@ -59,6 +59,47 @@ Respond ONLY with valid JSON conforming to this schema:
 }
 """
 
+INGREDIENT_FOCUSED_PROMPT = """
+You are a senior computer vision and food labeling analyst specializing in packaged food ingredients.
+Analyze the provided food packaging image with extreme focus.
+YOUR SOLE OBJECTIVE IS INGREDIENT AND ALLERGEN EXTRACTION.
+
+STRICT INSTRUCTIONS:
+1. IGNORE all nutrition facts tables, product marketing slogans, logos, brand blurbs, barcodes, prices, net weight, customer care details, and manufacturing licenses.
+2. Find the ingredients declaration anywhere on the package (may begin with 'INGREDIENTS:', 'INGREDIENTS -', 'LIST OF INGREDIENTS', 'CONTAINS:', or regional transliteration).
+3. Extract the COMPLETE list of ingredients:
+   - Preserve original sequence and exact wording (including sub-ingredients inside parentheses and brackets).
+   - Recognize all food additives, emulsifiers, preservatives, acidity regulators, artificial/natural flavours, and INS/E-numbers (e.g. INS 500(ii), INS 322).
+4. Extract declared allergen warnings ('Contains ...') and precautionary statements ('May contain ...', 'Manufactured on equipment that processes ...') separately.
+5. If some words are blurred, smudged, or partially cut off, identify them in 'uncertain_words'.
+6. If the image genuinely does NOT contain any readable ingredients declaration, set 'has_ingredients_declaration': false, 'ingredients': [], and provide a clear explanation in 'message'. NEVER invent or hallucinate ingredients.
+
+Respond ONLY with valid JSON conforming to this schema:
+{
+  "has_ingredients_declaration": true,
+  "raw_ingredients_text": "verbatim text as printed on package",
+  "ingredients": [
+    {
+      "original_text": "Refined Wheat Flour (Maida)",
+      "name": "Refined Wheat Flour",
+      "category": "Cereal & Grain",
+      "purpose": "Primary structural dough ingredient",
+      "simple_explanation": "Processed wheat flour used as the main base in baked goods.",
+      "concern_level": "safe",
+      "ins_number": null,
+      "is_common_allergen": true,
+      "status": "ai-assisted"
+    }
+  ],
+  "declared_allergens": ["Wheat", "Milk"],
+  "precautionary_allergens": ["May contain traces of Peanuts"],
+  "uncertain_words": [],
+  "extraction_level": "level_2_ai_assisted",
+  "confidence": 0.95,
+  "message": null
+}
+"""
+
 
 def _clean_json_response(raw_text: str) -> Optional[Dict[str, Any]]:
     """Strips markdown code fences and parses JSON safely."""
@@ -220,6 +261,111 @@ class MultimodalVisionExtractor:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": EXTRACTION_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "low"},
+                        },
+                    ],
+                }
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+    def extract_ingredients_only(
+        self,
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Specialized extraction method focused EXCLUSIVELY on ingredients and allergens.
+        Ideal for difficult packaging, curved surfaces, small text, or OCR fallback.
+        """
+        if not self.is_available():
+            logger.info("No vision LLM API key configured for ingredient extraction.")
+            return None
+
+        comp_bytes, comp_mime = prepare_vision_image_bytes(image_bytes)
+
+        if self.gemini_api_key:
+            try:
+                res = self._extract_ingredients_gemini(comp_bytes, comp_mime)
+                if res:
+                    return res
+            except Exception as e:
+                logger.warning(f"Gemini ingredient-focused extraction failed: {e}")
+
+        if self.openai_api_key:
+            try:
+                res = self._extract_ingredients_openai(comp_bytes, comp_mime)
+                if res:
+                    return res
+            except Exception as e:
+                logger.warning(f"OpenAI ingredient-focused extraction failed: {e}")
+
+        return None
+
+    def _extract_ingredients_gemini(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        from google import genai
+        from google.genai import types
+
+        if self._gemini_client is None:
+            self._gemini_client = genai.Client(api_key=self.gemini_api_key)
+
+        candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"]
+        last_exc = None
+
+        for model_name in candidate_models:
+            try:
+                response = self._gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type=mime_type,
+                        ),
+                        INGREDIENT_FOCUSED_PROMPT,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
+                )
+                if response and response.text:
+                    parsed = _clean_json_response(response.text)
+                    if parsed:
+                        return parsed
+            except Exception as e:
+                last_exc = e
+                continue
+
+        if last_exc:
+            logger.warning(f"Gemini ingredient models exhausted: {last_exc}")
+        return None
+
+    def _extract_ingredients_openai(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        from openai import OpenAI
+
+        if self._openai_client is None:
+            self._openai_client = OpenAI(api_key=self.openai_api_key, timeout=10.0)
+
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        data_url = f"data:{mime_type};base64,{b64_image}"
+
+        response = self._openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": INGREDIENT_FOCUSED_PROMPT},
                         {
                             "type": "image_url",
                             "image_url": {"url": data_url, "detail": "low"},

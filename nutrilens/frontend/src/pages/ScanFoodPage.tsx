@@ -21,6 +21,8 @@ import {
   ThumbsDown,
   Activity,
   Sliders,
+  Eye,
+  FileText,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -58,6 +60,7 @@ export const ScanFoodPage: React.FC = () => {
 
   // Mode: "scan" | "processing" | "results"
   const [viewMode, setViewMode] = useState<"scan" | "processing" | "results">("scan");
+  const [ingredientTab, setIngredientTab] = useState<"intelligence" | "list" | "allergens" | "evidence">("intelligence");
 
   // Camera & Image state
   const [queuedImage, setQueuedImage] = useState<QueuedImage | null>(null);
@@ -351,7 +354,7 @@ export const ScanFoodPage: React.FC = () => {
           'this can take up to 60 seconds on first use). Click "Try Again" below to retry.';
       } else if (msg.toLowerCase().includes("network error")) {
         msg =
-          'Analysis is taking longer than expected. Click "Try Again" below to retry.';
+          'Unable to connect to the NutriLens server. Please ensure the backend is running at http://localhost:8000, then click "Try Again".';
       }
       setScanError(msg);
     }
@@ -1039,28 +1042,138 @@ export const ScanFoodPage: React.FC = () => {
         {/* SECTION D: Ingredient Intelligence */}
         <Card className="border-slate-200 dark:border-slate-800 shadow-sm">
           <CardHeader className="pb-3 border-b border-slate-100 dark:border-slate-800">
-            <CardTitle className="text-lg font-bold flex items-center justify-between">
-              <span>Section D: Ingredient Intelligence & Safety</span>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <CardTitle className="text-lg font-bold flex flex-wrap items-center gap-2">
+                  <span>Section D: Ingredient Intelligence & Safety</span>
+                  {ingredients.extraction_summary?.level && (
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${
+                        ingredients.extraction_summary.level === "level_1_verified"
+                          ? "bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800"
+                          : ingredients.extraction_summary.level === "level_2_ai_assisted"
+                          ? "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800"
+                          : ingredients.extraction_summary.level === "level_3_estimated"
+                          ? "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800"
+                          : "bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      {ingredients.extraction_summary.level_label || "Level 1: Verified"}
+                    </span>
+                  )}
+                </CardTitle>
+                <CardDescription className="text-xs mt-0.5">
+                  Automated region isolation, additive purposes, allergen audit & visual evidence.
+                </CardDescription>
+              </div>
+
+              {/* Extraction Stats Header */}
               {ingredients.is_available && (
-                <span className="text-xs font-normal text-slate-500">
-                  {ingredients.recognized_count} recognized • {ingredients.unrecognized_count} uncategorized
-                </span>
+                <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-500">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                    {ingredients.total_count} detected
+                  </span>
+                  {(ingredients.extraction_summary?.verified_count ?? 0) > 0 && (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                      {ingredients.extraction_summary?.verified_count} verified
+                    </span>
+                  )}
+                  {(ingredients.extraction_summary?.ai_assisted_count ?? 0) > 0 && (
+                    <span className="text-blue-600 dark:text-blue-400 font-medium">
+                      {ingredients.extraction_summary?.ai_assisted_count} AI-assisted
+                    </span>
+                  )}
+                  {(ingredients.extraction_summary?.estimated_count ?? 0) > 0 && (
+                    <span className="text-amber-600 dark:text-amber-400 font-medium">
+                      {ingredients.extraction_summary?.estimated_count} estimated
+                    </span>
+                  )}
+                </div>
               )}
-            </CardTitle>
-            <CardDescription className="text-xs">
-              Additives, preservatives, sweeteners, and ingredient purpose identification.
-            </CardDescription>
+            </div>
+
+            {/* Sub-view Navigation Tabs */}
+            {ingredients.is_available && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-3 mt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIngredientTab("intelligence")}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    ingredientTab === "intelligence"
+                      ? "bg-emerald-600 text-white shadow-sm"
+                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  }`}
+                >
+                  <Activity className="h-3.5 w-3.5" />
+                  Functional Intelligence ({ingredients.recognized_count || 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIngredientTab("list")}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    ingredientTab === "list"
+                      ? "bg-emerald-600 text-white shadow-sm"
+                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  }`}
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  Complete Declaration ({ingredients.total_count || 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIngredientTab("allergens")}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    ingredientTab === "allergens"
+                      ? "bg-emerald-600 text-white shadow-sm"
+                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  }`}
+                >
+                  <ShieldAlert className="h-3.5 w-3.5" />
+                  Allergen Audit
+                  {((ingredients.allergen_information?.declared?.length || 0) +
+                    (ingredients.allergen_information?.precautionary?.length || 0)) > 0 && (
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIngredientTab("evidence")}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    ingredientTab === "evidence"
+                      ? "bg-emerald-600 text-white shadow-sm"
+                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  }`}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Extraction Evidence
+                  {ingredients.evidence?.crop_url && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  )}
+                </button>
+              </div>
+            )}
           </CardHeader>
-          <CardContent className="pt-6 space-y-4">
+          <CardContent className="pt-5 space-y-4">
             {!ingredients.is_available ? (
-              <div className="p-6 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-center space-y-2">
-                <AlertCircle className="h-8 w-8 text-slate-400 mx-auto" />
-                <h3 className="font-semibold text-slate-900 dark:text-slate-100 text-sm">
-                  Ingredient Analysis Unavailable
-                </h3>
-                <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  {ingredients.message || "No ingredients list could be extracted from this label image."}
-                </p>
+              <div className="p-6 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-center space-y-3">
+                <AlertCircle className="h-9 w-9 text-slate-400 mx-auto" />
+                <div className="space-y-1">
+                  <h3 className="font-semibold text-slate-900 dark:text-slate-100 text-sm">
+                    Ingredient Declaration Not Detected
+                  </h3>
+                  <p className="text-xs text-slate-500 max-w-lg mx-auto">
+                    {ingredients.message ||
+                      "No readable ingredients declaration was found on this packaging image. NutriLens adheres to strict safety principles and never fabricates ingredients."}
+                  </p>
+                </div>
+                <div className="p-3 bg-white dark:bg-slate-950 rounded border border-slate-200 dark:border-slate-800 text-left max-w-md mx-auto text-[11px] text-slate-600 dark:text-slate-400 space-y-1">
+                  <p className="font-semibold text-slate-800 dark:text-slate-200">Tips for Best Results:</p>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    <li>Capture the back or side panel where "INGREDIENTS" is printed.</li>
+                    <li>Ensure good ambient lighting without harsh flash reflection.</li>
+                    <li>Keep the text aligned horizontally for best OCR precision.</li>
+                  </ul>
+                </div>
               </div>
             ) : (
               <div className="space-y-4">
@@ -1072,7 +1185,7 @@ export const ScanFoodPage: React.FC = () => {
                       Ingredients to Note ({ingredients.concerns.length})
                     </h5>
                     <ul className="space-y-1 text-xs text-amber-800 dark:text-amber-300">
-                      {ingredients.concerns.map((con, idx) => (
+                      {ingredients.concerns.map((con: any, idx: number) => (
                         <li key={idx}>
                           <span className="font-semibold">{con.ingredient}:</span> {con.note}
                         </li>
@@ -1081,63 +1194,270 @@ export const ScanFoodPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Recognized Ingredients Table */}
-                <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase font-semibold">
-                      <tr>
-                        <th className="py-2 px-3">Ingredient</th>
-                        <th className="py-2 px-3">Category</th>
-                        <th className="py-2 px-3">Functional Purpose</th>
-                        <th className="py-2 px-3 text-right">Safety Level</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {ingredients.recognized.map((item, idx) => (
-                        <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/30">
-                          <td className="py-2.5 px-3">
-                            <span className="font-semibold text-slate-800 dark:text-slate-200 block">
-                              {item.name}
-                            </span>
-                            {item.ins_number && (
-                              <span className="text-[10px] text-slate-400 font-mono">INS {item.ins_number}</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">
-                            {item.category}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">
-                            {item.purpose}
-                          </td>
-                          <td className="py-2.5 px-3 text-right">
-                            <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${
-                              item.concern_level === "high" ? "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200" :
-                              item.concern_level === "moderate" ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200" :
-                              "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
-                            }`}>
-                              {item.concern_level}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Unrecognized Ingredients Section */}
-                {ingredients.unrecognized && ingredients.unrecognized.length > 0 && (
-                  <div className="p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-lg">
-                    <h5 className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
-                      <Info className="h-3.5 w-3.5 text-slate-400" />
-                      Unrecognized or Complex Ingredients ({ingredients.unrecognized.length})
-                    </h5>
-                    <div className="flex flex-wrap gap-1.5">
-                      {ingredients.unrecognized.map((unrec, idx) => (
-                        <Badge key={idx} variant="outline" className="text-xs text-slate-600 dark:text-slate-400">
-                          {unrec.original_text || unrec.name}
-                        </Badge>
-                      ))}
+                {/* TAB 1: FUNCTIONAL INTELLIGENCE */}
+                {ingredientTab === "intelligence" && (
+                  <div className="space-y-4">
+                    <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 uppercase font-semibold">
+                          <tr>
+                            <th className="py-2.5 px-3">Ingredient</th>
+                            <th className="py-2.5 px-3">Category</th>
+                            <th className="py-2.5 px-3">Functional Role & Purpose</th>
+                            <th className="py-2.5 px-3">Consumer Explanation</th>
+                            <th className="py-2.5 px-3 text-right">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {ingredients.recognized.map((item: any, idx: number) => (
+                            <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/30">
+                              <td className="py-2.5 px-3 align-top">
+                                <span className="font-semibold text-slate-800 dark:text-slate-200 block">
+                                  {item.name}
+                                </span>
+                                {item.ins_number && (
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    INS {item.ins_number}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 align-top">
+                                <span className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[11px]">
+                                  {item.category}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-700 dark:text-slate-300 font-medium align-top">
+                                {item.purpose}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-500 dark:text-slate-400 text-[11px] max-w-xs align-top">
+                                {item.simple_explanation || item.observations || "Standard food ingredient component."}
+                              </td>
+                              <td className="py-2.5 px-3 text-right align-top">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
+                                    item.status === "verified"
+                                      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+                                      : item.status === "ai-assisted"
+                                      ? "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200"
+                                      : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                                  }`}
+                                >
+                                  {item.status || "verified"}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
+
+                    {/* Unrecognized Ingredients Section */}
+                    {ingredients.unrecognized && ingredients.unrecognized.length > 0 && (
+                      <div className="p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-lg">
+                        <h5 className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
+                          <Info className="h-3.5 w-3.5 text-slate-400" />
+                          Uncategorized or Compound Ingredients ({ingredients.unrecognized.length})
+                        </h5>
+                        <div className="flex flex-wrap gap-1.5">
+                          {ingredients.unrecognized.map((unrec: any, idx: number) => (
+                            <Badge key={idx} variant="outline" className="text-xs text-slate-600 dark:text-slate-400">
+                              {unrec.original_text || unrec.name}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* TAB 2: COMPLETE INGREDIENT LIST (DECLARATION SEQUENCE) */}
+                {ingredientTab === "list" && (
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-500">
+                      Ingredients are listed in order of declaration as printed on the package:
+                    </p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                      {[...(ingredients.recognized || []), ...(ingredients.unrecognized || [])].map(
+                        (item: any, idx: number) => (
+                          <div
+                            key={idx}
+                            className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-start justify-between gap-2 shadow-xs"
+                          >
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-mono text-slate-400 font-semibold">
+                                  #{idx + 1}
+                                </span>
+                                <span className="font-semibold text-xs text-slate-800 dark:text-slate-200">
+                                  {item.name}
+                                </span>
+                              </div>
+                              {item.original_text && item.original_text !== item.name && (
+                                <p className="text-[11px] text-slate-400 italic font-mono">
+                                  Printed: "{item.original_text}"
+                                </p>
+                              )}
+                              <p className="text-[11px] text-slate-500">
+                                {item.purpose || item.category || "Ingredient component"}
+                              </p>
+                            </div>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider shrink-0 ${
+                                item.status === "verified"
+                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+                                  : item.status === "ai-assisted"
+                                  ? "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200"
+                                  : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                              }`}
+                            >
+                              {item.status || "verified"}
+                            </span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* TAB 3: ALLERGEN AUDIT */}
+                {ingredientTab === "allergens" && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {/* Declared Allergens */}
+                      <div className="p-4 rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 space-y-2">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-rose-800 dark:text-rose-300">
+                          <ShieldAlert className="h-4 w-4 text-rose-600" />
+                          Declared Allergens (Mandatory Statement)
+                        </div>
+                        {ingredients.allergen_information?.declared &&
+                        ingredients.allergen_information.declared.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {ingredients.allergen_information.declared.map((a: string, idx: number) => (
+                              <span
+                                key={idx}
+                                className="px-2.5 py-1 rounded bg-rose-100 text-rose-900 dark:bg-rose-900 dark:text-rose-100 text-xs font-semibold"
+                              >
+                                {a}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-500 italic">No explicit declared allergen statement detected.</p>
+                        )}
+                      </div>
+
+                      {/* Precautionary Allergens */}
+                      <div className="p-4 rounded-lg border border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/20 space-y-2">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-300">
+                          <AlertTriangle className="h-4 w-4 text-amber-600" />
+                          Precautionary Statements ("May Contain")
+                        </div>
+                        {ingredients.allergen_information?.precautionary &&
+                        ingredients.allergen_information.precautionary.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {ingredients.allergen_information.precautionary.map((p: string, idx: number) => (
+                              <span
+                                key={idx}
+                                className="px-2.5 py-1 rounded bg-amber-100 text-amber-900 dark:bg-amber-900 dark:text-amber-100 text-xs font-semibold"
+                              >
+                                {p}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-500 italic">No cross-contact precautionary warnings declared.</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Uncertain Allergen Findings */}
+                    {ingredients.allergen_information?.uncertain &&
+                      ingredients.allergen_information.uncertain.length > 0 && (
+                        <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 space-y-1.5">
+                          <h6 className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                            <Info className="h-3.5 w-3.5 text-slate-400" />
+                            Uncertain Allergen Indicators (Unverified Sources)
+                          </h6>
+                          <div className="flex flex-wrap gap-1.5 pt-0.5">
+                            {ingredients.allergen_information.uncertain.map((u: string, idx: number) => (
+                              <span
+                                key={idx}
+                                className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300 text-[11px]"
+                              >
+                                {u}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                  </div>
+                )}
+
+                {/* TAB 4: EXTRACTION EVIDENCE & CROP */}
+                {ingredientTab === "evidence" && (
+                  <div className="space-y-4">
+                    {/* Visual Crop Preview */}
+                    {ingredients.evidence?.crop_url ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                            <Eye className="h-3.5 w-3.5 text-emerald-600" />
+                            Isolated Ingredients Region (Auto-Cropped with Adaptive Contrast)
+                          </span>
+                          <a
+                            href={ingredients.evidence.crop_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-emerald-600 hover:underline font-medium"
+                          >
+                            View Full Resolution
+                          </a>
+                        </div>
+                        <div className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-slate-950 flex items-center justify-center max-h-64 overflow-hidden">
+                          <img
+                            src={ingredients.evidence.crop_url}
+                            alt="Cropped ingredient region"
+                            className="max-h-60 object-contain rounded"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-4 rounded-lg bg-slate-50 dark:bg-slate-900 text-center text-xs text-slate-500">
+                        Cropped region visual evidence was processed in-memory.
+                      </div>
+                    )}
+
+                    {/* Verbatim Source OCR Text */}
+                    {ingredients.evidence?.raw_source_text && (
+                      <div className="space-y-1.5">
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          Recognized Source Text (Raw OCR Stream)
+                        </span>
+                        <pre className="p-3 rounded-lg bg-slate-900 text-slate-200 font-mono text-[11px] leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto border border-slate-800">
+                          {ingredients.evidence.raw_source_text}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* Uncertain Words */}
+                    {ingredients.evidence?.uncertain_words &&
+                      ingredients.evidence.uncertain_words.length > 0 && (
+                        <div className="p-3 bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded-lg space-y-1">
+                          <span className="text-xs font-semibold text-amber-800 dark:text-amber-200">
+                            Uncertain Words Requiring Review:
+                          </span>
+                          <div className="flex flex-wrap gap-1 pt-1">
+                            {ingredients.evidence.uncertain_words.map((w: string, idx: number) => (
+                              <span
+                                key={idx}
+                                className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 dark:bg-amber-900 dark:text-amber-100 text-[10px] font-mono"
+                              >
+                                {w}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                   </div>
                 )}
               </div>

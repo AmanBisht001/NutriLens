@@ -35,6 +35,7 @@ from app.food_scanner.preprocessor import (
 from app.food_scanner.ocr_engine import get_ocr_engine
 from app.food_scanner.extractor import extract_structured_label_info
 from app.food_scanner.vision_extractor import MultimodalVisionExtractor
+from app.food_scanner.ingredient_detector import detect_and_crop_ingredient_region
 from app.schemas.scan import ScanCorrectionRequest, ScanConfirmRequest
 from app.scoring_engine.service import analyze_nutrition_payload
 from app.suitability_engine.matcher import evaluate_suitability
@@ -181,15 +182,79 @@ class IngredientKnowledgeCache:
         return None
 
 
+# Built-in high-accuracy additive intelligence dictionary indexed by INS / E number
+COMMON_ADDITIVES_INTELLIGENCE: Dict[str, Dict[str, Any]] = {
+    # Emulsifiers
+    "322": {"name": "Lecithins (INS 322)", "category": "Emulsifier", "purpose": "Emulsifier & surfactant", "explanation": "Plant-derived compound (usually from soy or sunflower) that prevents separation of fats and water.", "concern_level": "safe", "ins_number": "322", "is_common_allergen": True, "observations": "Standard plant phospholipid; allergen warning applies if soy-derived."},
+    "471": {"name": "Mono- and Diglycerides of Fatty Acids (INS 471)", "category": "Emulsifier", "purpose": "Texture stabilizer & volume enhancer", "explanation": "Lipid-based emulsifier derived from plant oils to improve crumb softness and shelf-life.", "concern_level": "safe", "ins_number": "471", "is_common_allergen": False, "observations": "Widely used in baked goods to extend freshness and crumb elasticity."},
+    "472e": {"name": "DATEM (INS 472e)", "category": "Emulsifier", "purpose": "Dough strengthener", "explanation": "Diacetyl tartaric acid ester used in baking to strengthen gluten network and improve oven rise.", "concern_level": "safe", "ins_number": "472e", "is_common_allergen": False, "observations": "Standard commercial dough conditioner."},
+    # Raising Agents & Leaveners
+    "500": {"name": "Sodium Carbonates (INS 500)", "category": "Raising Agent", "purpose": "Leavening & pH regulation", "explanation": "Commonly known as baking soda; releases carbon dioxide gas when heated to make baked goods rise.", "concern_level": "safe", "ins_number": "500", "is_common_allergen": False, "observations": "Standard food-grade leavening agent."},
+    "500ii": {"name": "Sodium Hydrogen Carbonate (INS 500(ii))", "category": "Raising Agent", "purpose": "Leavening agent (Baking Soda)", "explanation": "Releases carbon dioxide micro-bubbles during baking for light, aerated texture.", "concern_level": "safe", "ins_number": "500(ii)", "is_common_allergen": False, "observations": "Completely volatilizes or neutralizes during thermal processing."},
+    "503": {"name": "Ammonium Carbonates (INS 503)", "category": "Raising Agent", "purpose": "Crispness leavening agent", "explanation": "Traditional baker's ammonia used in cookies and crackers to produce uniform crispness.", "concern_level": "safe", "ins_number": "503", "is_common_allergen": False, "observations": "Dissipates completely in low-moisture baking."},
+    "503ii": {"name": "Ammonium Hydrogen Carbonate (INS 503(ii))", "category": "Raising Agent", "purpose": "Leavening agent for crisp biscuits", "explanation": "Volatilizes completely upon baking, creating crisp, dry texture in thin biscuits and wafers.", "concern_level": "safe", "ins_number": "503(ii)", "is_common_allergen": False, "observations": "Leaves zero chemical residue in baked biscuits."},
+    "450": {"name": "Diphosphates (INS 450)", "category": "Raising Agent", "purpose": "Baking acidulant & leavening", "explanation": "Controls the rate of gas release in baking powder for consistent oven rise.", "concern_level": "safe", "ins_number": "450", "is_common_allergen": False, "observations": "Regulated food-grade phosphate salt."},
+    # Preservatives
+    "202": {"name": "Potassium Sorbate (INS 202)", "category": "Preservative", "purpose": "Antimicrobial & mold inhibitor", "explanation": "Potassium salt of sorbic acid used to inhibit mold, yeast, and bacterial spoilage.", "concern_level": "safe", "ins_number": "202", "is_common_allergen": False, "observations": "Extensively studied and approved safe preservative."},
+    "211": {"name": "Sodium Benzoate (INS 211)", "category": "Preservative", "purpose": "Acidic food preservative", "explanation": "Widely used in acidic beverages, sauces, and jams to inhibit bacterial and fungal growth.", "concern_level": "moderate", "ins_number": "211", "is_common_allergen": False, "observations": "Common preservative; consume within standard dietary limits."},
+    "223": {"name": "Sodium Metabisulphite (INS 223)", "category": "Preservative", "purpose": "Dough conditioner & antioxidant", "explanation": "Sulphite preservative that relaxes gluten in biscuit dough and prevents enzymatic browning.", "concern_level": "moderate", "ins_number": "223", "is_common_allergen": True, "observations": "Contains sulphites; individuals with asthma or sulphite sensitivity should note."},
+    # Acidity Regulators & Antioxidants
+    "330": {"name": "Citric Acid (INS 330)", "category": "Acidity Regulator", "purpose": "Tartness & pH buffer", "explanation": "Naturally occurring organic acid providing refreshing tartness and antioxidant synergy.", "concern_level": "safe", "ins_number": "330", "is_common_allergen": False, "observations": "Natural organic acid, ubiquitous in fruits and foods."},
+    "331": {"name": "Sodium Citrates (INS 331)", "category": "Acidity Regulator", "purpose": "Buffering agent", "explanation": "Sodium salt of citric acid used to stabilize acidity and control gel formation.", "concern_level": "safe", "ins_number": "331", "is_common_allergen": False, "observations": "Safe food salt used for pH control."},
+    "300": {"name": "Ascorbic Acid (INS 300)", "category": "Antioxidant", "purpose": "Flour treatment & Vitamin C", "explanation": "Pure Vitamin C used as an antioxidant to prevent rancidity and strengthen bread dough.", "concern_level": "safe", "ins_number": "300", "is_common_allergen": False, "observations": "Essential nutrient (Vitamin C) acting as safe antioxidant."},
+    "319": {"name": "TBHQ (INS 319)", "category": "Antioxidant", "purpose": "Synthetic fat stabilizer", "explanation": "Tertiary butylhydroquinone; synthetic antioxidant preventing oxidative rancidity in cooking oils.", "concern_level": "moderate", "ins_number": "319", "is_common_allergen": False, "observations": "Regulated synthetic antioxidant; strictly limited to approved threshold concentrations."},
+    # Thickeners, Gums & Stabilizers
+    "412": {"name": "Guar Gum (INS 412)", "category": "Thickener & Stabilizer", "purpose": "Viscosity & moisture retention", "explanation": "Natural dietary fiber extracted from guar beans used to thicken sauces and stabilize dough.", "concern_level": "safe", "ins_number": "412", "is_common_allergen": False, "observations": "Natural soluble plant fiber with zero known toxicity."},
+    "415": {"name": "Xanthan Gum (INS 415)", "category": "Thickener & Stabilizer", "purpose": "Texture stabilizer & suspension", "explanation": "Fermentation-derived polysaccharide that provides smooth texture and prevents ingredient separation.", "concern_level": "safe", "ins_number": "415", "is_common_allergen": False, "observations": "Widely used gluten-free hydrocolloid."},
+    "407": {"name": "Carrageenan (INS 407)", "category": "Thickener & Gelling Agent", "purpose": "Gelling agent in dairy", "explanation": "Red seaweed extract used for gelling and dairy protein stabilization.", "concern_level": "moderate", "ins_number": "407", "is_common_allergen": False, "observations": "Approved hydrocolloid; excessive intake may cause mild digestive sensitivity."},
+    # Flavour Enhancers
+    "621": {"name": "Monosodium Glutamate (INS 621)", "category": "Flavour Enhancer", "purpose": "Savory umami enhancer", "explanation": "Sodium salt of glutamic acid producing a rich savory taste; widely evaluated and approved by WHO and FSSAI.", "concern_level": "safe", "ins_number": "621", "is_common_allergen": False, "observations": "Glutamate salt occurring naturally in tomatoes, aged cheeses, and mushrooms."},
+    "627": {"name": "Disodium Guanylate (INS 627)", "category": "Flavour Enhancer", "purpose": "Umami flavor synergy", "explanation": "Nucleotide flavour enhancer used synergistically with MSG to amplify savory perception.", "concern_level": "safe", "ins_number": "627", "is_common_allergen": False, "observations": "High-potency umami nucleotide."},
+    "631": {"name": "Disodium Inosinate (INS 631)", "category": "Flavour Enhancer", "purpose": "Umami synergist", "explanation": "Naturally occurring nucleotide producing rich savory mouthfeel in seasonings.", "concern_level": "safe", "ins_number": "631", "is_common_allergen": False, "observations": "Pairs with guanylate for multi-layer flavor."},
+    # Colours
+    "150d": {"name": "Caramel IV (INS 150d)", "category": "Food Colour", "purpose": "Brown coloring agent", "explanation": "Heat-treated carbohydrate colorant giving colas and sauces deep brown hue.", "concern_level": "moderate", "ins_number": "150d", "is_common_allergen": False, "observations": "Sulphite-ammonia caramel; safe within regulatory limits."},
+    "102": {"name": "Tartrazine (INS 102)", "category": "Food Colour", "purpose": "Bright yellow colorant", "explanation": "Synthetic azo dye providing bright lemon yellow color; requires advisory for sensitive individuals.", "concern_level": "moderate", "ins_number": "102", "is_common_allergen": True, "observations": "Azo food color; sensitive individuals may experience mild intolerance."},
+    "110": {"name": "Sunset Yellow FCF (INS 110)", "category": "Food Colour", "purpose": "Orange colorant", "explanation": "Synthetic orange-yellow dye used in beverages, confectioneries, and snack seasonings.", "concern_level": "moderate", "ins_number": "110", "is_common_allergen": True, "observations": "Regulated food dye."},
+}
+
+# Common base food component regex patterns and their intelligence
+COMMON_FOOD_COMPONENTS: List[Tuple[str, Dict[str, Any]]] = [
+    (r"\b(?:refined\s+wheat\s+flour|maida)\b", {"name": "Refined Wheat Flour (Maida)", "category": "Cereal & Grain", "purpose": "Primary structural dough base", "explanation": "Milled wheat endosperm with bran and germ removed, forming the carbohydrate structure of baked goods.", "concern_level": "safe", "is_common_allergen": True, "observations": "Main carbohydrate base in baked confectionery; contains gluten."}),
+    (r"\b(?:wheat\s+flour|whole\s+wheat\s+flour|atta)\b", {"name": "Whole Wheat Flour (Atta)", "category": "Cereal & Grain", "purpose": "Wholesome flour base with natural bran", "explanation": "Whole grain flour containing bran, germ, and endosperm; good source of dietary fibre.", "concern_level": "safe", "is_common_allergen": True, "observations": "Contains natural wheat bran and gluten."}),
+    (r"\b(?:sugar|sucrose)\b", {"name": "Sugar", "category": "Sweetener", "purpose": "Sweetening, browning & texture", "explanation": "Simple carbohydrate providing sweetness, tender texture, and golden browning through caramelization.", "concern_level": "moderate", "is_common_allergen": False, "observations": "Provides quick carbohydrate calories; excessive intake should be monitored."}),
+    (r"\b(?:invert\s+sugar(?:\s+syrup)?)\b", {"name": "Invert Sugar Syrup", "category": "Sweetener", "purpose": "Moisture retention & tender crumb", "explanation": "Glucose-fructose syrup that retains moisture, preventing baked goods from drying out.", "concern_level": "moderate", "is_common_allergen": False, "observations": "Hygroscopic sweetener commonly used to maintain freshness in biscuits."}),
+    (r"\b(?:glucose\s+syrup|liquid\s+glucose)\b", {"name": "Liquid Glucose", "category": "Sweetener", "purpose": "Texture controller & anti-crystallization", "explanation": "Starch-derived syrup that inhibits sugar crystallization and provides chewiness.", "concern_level": "moderate", "is_common_allergen": False, "observations": "Common confectionery syrup derived from maize starch."}),
+    (r"\b(?:maltodextrin)\b", {"name": "Maltodextrin", "category": "Carbohydrate", "purpose": "Bulking agent & flavor carrier", "explanation": "Easily digestible starch derivative used to carry spray-dried flavorings and add body.", "concern_level": "safe", "is_common_allergen": False, "observations": "Hydrolyzed starch polysaccharide."}),
+    (r"\b(?:edible\s+vegetable\s+oil|palm\s+oil|palmolein)\b", {"name": "Refined Palm Oil", "category": "Edible Vegetable Fat", "purpose": "Shortening fat & crispness", "explanation": "Vegetable oil rich in palmitic acid providing thermal stability for frying and crisp crumb in biscuits.", "concern_level": "moderate", "is_common_allergen": False, "observations": "Plant-based fat with balanced saturated and unsaturated fatty acid profile."}),
+    (r"\b(?:milk\s+solids|dairy\s+solids|skimmed\s+milk\s+powder)\b", {"name": "Milk Solids", "category": "Dairy", "purpose": "Flavor, protein & browning", "explanation": "Dehydrated milk proteins and lactose enhancing dairy richness and oven browning.", "concern_level": "safe", "is_common_allergen": True, "observations": "Contains dairy lactose and milk protein allergens."}),
+    (r"\b(?:cocoa\s+solids|cocoa\s+powder)\b", {"name": "Cocoa Solids", "category": "Flavoring & Color", "purpose": "Chocolate flavor & color", "explanation": "Non-fat component of cocoa beans providing rich chocolate flavor, polyphenols, and color.", "concern_level": "safe", "is_common_allergen": False, "observations": "Natural source of antioxidant flavanols."}),
+    (r"\b(?:cocoa\s+butter)\b", {"name": "Cocoa Butter", "category": "Edible Vegetable Fat", "purpose": "Melt-in-mouth fat crystal structure", "explanation": "Natural vegetable fat extracted from cocoa beans providing glossy finish and body-temperature melting.", "concern_level": "safe", "is_common_allergen": False, "observations": "Premium confectionery fat high in stearic and oleic fatty acids."}),
+    (r"\b(?:iodised\s+salt|salt)\b", {"name": "Iodised Salt", "category": "Mineral & Seasoning", "purpose": "Flavor balance & dough strengthening", "explanation": "Purified sodium chloride fortified with iodine; enhances sweetness perception and regulates yeast activity.", "concern_level": "safe", "is_common_allergen": False, "observations": "Fortified with iodine for thyroid health."}),
+    (r"\b(?:nature\s+identical\s+flavour|artificial\s+flavour|flavouring\s+substances?)\b", {"name": "Flavouring Substances", "category": "Flavouring", "purpose": "Aroma and taste enhancement", "explanation": "Standardized aromatic compounds that impart characteristic aroma (e.g. vanilla, butter, chocolate).", "concern_level": "safe", "is_common_allergen": False, "observations": "Food-grade aroma molecules complying with FSSAI regulations."}),
+    (r"\b(?:dough\s+conditioner)\b", {"name": "Dough Conditioner", "category": "Baking Aid", "purpose": "Gluten relaxation & machinability", "explanation": "Food-grade agent that optimizes dough elasticity and prevents shrinkage during baking.", "concern_level": "safe", "is_common_allergen": False, "observations": "Processing aid for uniform biscuit shape and thickness."}),
+]
+
+
 def match_and_explain_ingredients(
-    ingredients: List[str],
+    ingredients: List[Any],
     db: Session,
+    extraction_level: str = "level_1_verified",
+    extraction_method: str = "PaddleOCR",
+    confidence: float = 0.90,
+    raw_ingredients_text: Optional[str] = None,
+    crop_url: Optional[str] = None,
+    uncertain_words: Optional[List[str]] = None,
+    declared_allergens: Optional[List[str]] = None,
+    precautionary_allergens: Optional[List[str]] = None,
+    uncertain_allergens: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Matches extracted ingredients against canonical Ingredient knowledge base.
-    Uses IngredientKnowledgeCache for O(1) in-memory index lookups instead of repetitive DB queries.
-    Separates recognized ingredients (with purpose, category, concern level, INS, allergen info)
-    from unrecognized ingredients.
+    Comprehensive Ingredient Intelligence & Safety Engine:
+    - Matches ingredients against canonical DB and rich additive knowledge base
+    - Provides category, functional purpose, simple-language explanation, and observations
+    - Implements the 4-level transparent fallback hierarchy (never shows an error/blank card)
+    - Labels each ingredient with its exact extraction status (verified / ai-assisted / estimated)
+    - Returns visual extraction evidence (cropped region URL, source raw text, uncertain words)
     """
     if not ingredients or len(ingredients) == 0:
         return {
@@ -201,64 +266,220 @@ def match_and_explain_ingredients(
             "recognized": [],
             "unrecognized": [],
             "concerns": [],
+            "extraction_summary": {
+                "level": "level_4_limited",
+                "level_label": "Level 4: Limited Image Information",
+                "method": extraction_method or "OCR Scan",
+                "overall_confidence": round(confidence, 4),
+                "total_detected": 0,
+                "verified_count": 0,
+                "ai_assisted_count": 0,
+                "estimated_count": 0,
+                "status_badge_color": "slate",
+            },
+            "evidence": {
+                "crop_url": crop_url,
+                "raw_source_text": raw_ingredients_text,
+                "uncertain_words": uncertain_words or [],
+            },
+            "allergen_information": {
+                "declared": declared_allergens or [],
+                "precautionary": precautionary_allergens or [],
+                "uncertain": uncertain_allergens or [],
+            },
         }
 
     recognized = []
     unrecognized = []
     concerns = []
 
-    # Get cached indexed knowledge base (zero DB queries on repeated scans)
+    # Get cached indexed DB knowledge base (zero DB queries on repeated scans)
     cache = IngredientKnowledgeCache.get_or_refresh(db)
 
+    # Determine default ingredient status based on extraction level
+    default_status = (
+        "verified" if "level_1" in extraction_level else
+        "ai-assisted" if "level_2" in extraction_level else
+        "estimated"
+    )
+
+    verified_count = 0
+    ai_assisted_count = 0
+    estimated_count = 0
+
     for token in ingredients:
-        clean_token = token.strip()
+        # If token is already an enriched dict from Vision LLM
+        if isinstance(token, dict):
+            clean_token = token.get("original_text") or token.get("name") or ""
+            token_status = token.get("status") or default_status
+            item_info = {
+                "name": token.get("name") or clean_token,
+                "original_text": clean_token,
+                "category": token.get("category") or "General Component",
+                "purpose": token.get("purpose") or "Ingredient component",
+                "simple_explanation": token.get("simple_explanation") or token.get("purpose") or "Standard food ingredient.",
+                "concern_level": token.get("concern_level") or "safe",
+                "ins_number": token.get("ins_number"),
+                "is_common_allergen": bool(token.get("is_common_allergen")),
+                "status": token_status,
+                "extraction_status": "AI-assisted" if token_status == "ai-assisted" else token_status.capitalize(),
+                "observations": token.get("observations") or "Identified via multimodal vision analysis.",
+            }
+            recognized.append(item_info)
+            if token_status == "verified":
+                verified_count += 1
+            elif token_status == "ai-assisted":
+                ai_assisted_count += 1
+            else:
+                estimated_count += 1
+            continue
+
+        clean_token = str(token).strip()
         if not clean_token:
             continue
 
         token_lower = clean_token.lower()
         matched_info = cache.match_token(token_lower)
 
+        # 1. Check canonical DB
         if matched_info:
             item_info = {
                 "name": matched_info["name"],
                 "original_text": clean_token,
                 "category": matched_info.get("category") or "General",
-                "purpose": matched_info.get("purpose") or "Ingredient component",
+                "purpose": matched_info.get("purpose") or matched_info.get("description") or "Ingredient component",
+                "simple_explanation": matched_info.get("description") or matched_info.get("purpose") or "Standard food component verified in database.",
                 "concern_level": matched_info.get("concern_level") or "safe",
                 "ins_number": matched_info.get("ins_number"),
                 "is_common_allergen": bool(matched_info.get("is_common_allergen")),
-                "source_reference": matched_info.get("source_reference"),
+                "status": default_status,
+                "extraction_status": "AI-assisted" if default_status == "ai-assisted" else default_status.capitalize(),
+                "observations": matched_info.get("source_reference") or "Verified against official food additives registry.",
             }
             recognized.append(item_info)
-
-            # Check if this ingredient raises concern
-            concern_level = matched_info.get("concern_level")
-            is_common_allergen = bool(matched_info.get("is_common_allergen"))
-            if concern_level in ("high", "moderate") or is_common_allergen:
-                concerns.append({
-                    "ingredient": matched_info["name"],
-                    "concern_level": concern_level,
-                    "is_common_allergen": is_common_allergen,
-                    "note": matched_info.get("description") or matched_info.get("purpose") or f"Concern level: {concern_level}",
-                })
         else:
-            unrecognized.append({
-                "name": clean_token,
-                "original_text": clean_token,
-                "category": "Uncategorized",
-                "purpose": "Not found in standard additives knowledge base",
-                "concern_level": "unknown",
+            # 2. Check built-in INS additive intelligence dictionary
+            ins_match = re.search(r"\b(?:ins|e)\s*[-_]?\s*(\d{3,4}[a-z]?)\b", token_lower)
+            additive_info = None
+            if ins_match:
+                code_key = ins_match.group(1).lower().replace("(", "").replace(")", "")
+                additive_info = COMMON_ADDITIVES_INTELLIGENCE.get(code_key)
+                if not additive_info:
+                    # Try base number without letter
+                    base_num = re.sub(r"[a-z]", "", code_key)
+                    additive_info = COMMON_ADDITIVES_INTELLIGENCE.get(base_num)
+
+            if additive_info:
+                item_info = {
+                    "name": additive_info["name"],
+                    "original_text": clean_token,
+                    "category": additive_info["category"],
+                    "purpose": additive_info["purpose"],
+                    "simple_explanation": additive_info["explanation"],
+                    "concern_level": additive_info["concern_level"],
+                    "ins_number": additive_info.get("ins_number"),
+                    "is_common_allergen": additive_info.get("is_common_allergen", False),
+                    "status": default_status,
+                    "extraction_status": "AI-assisted" if default_status == "ai-assisted" else default_status.capitalize(),
+                    "observations": additive_info.get("observations", "Food additive conforming to international standards."),
+                }
+                recognized.append(item_info)
+            else:
+                # 3. Check common food component regex patterns
+                component_info = None
+                for pat, comp_meta in COMMON_FOOD_COMPONENTS:
+                    if re.search(pat, token_lower):
+                        component_info = comp_meta
+                        break
+
+                if component_info:
+                    item_info = {
+                        "name": component_info["name"],
+                        "original_text": clean_token,
+                        "category": component_info["category"],
+                        "purpose": component_info["purpose"],
+                        "simple_explanation": component_info["explanation"],
+                        "concern_level": component_info["concern_level"],
+                        "ins_number": None,
+                        "is_common_allergen": component_info.get("is_common_allergen", False),
+                        "status": default_status,
+                        "extraction_status": "AI-assisted" if default_status == "ai-assisted" else default_status.capitalize(),
+                        "observations": component_info.get("observations", "Recognized base culinary component."),
+                    }
+                    recognized.append(item_info)
+                else:
+                    # 4. Unrecognized or complex item
+                    is_est = "level_3" in extraction_level
+                    item_status = "estimated" if is_est else default_status
+                    item_info = {
+                        "name": clean_token,
+                        "original_text": clean_token,
+                        "category": "Uncategorized Component",
+                        "purpose": "Food ingredient component",
+                        "simple_explanation": f"Declared ingredient '{clean_token}' parsed from package declaration.",
+                        "concern_level": "unknown",
+                        "ins_number": None,
+                        "is_common_allergen": False,
+                        "status": item_status,
+                        "extraction_status": "AI-assisted" if item_status == "ai-assisted" else item_status.capitalize(),
+                        "observations": "Parsed directly from package declaration.",
+                    }
+                    unrecognized.append(item_info)
+
+        # Count status
+        if default_status == "verified":
+            verified_count += 1
+        elif default_status == "ai-assisted":
+            ai_assisted_count += 1
+        else:
+            estimated_count += 1
+
+        # Check concern level
+        if item_info.get("concern_level") in ("high", "moderate") or item_info.get("is_common_allergen"):
+            concerns.append({
+                "ingredient": item_info["name"],
+                "concern_level": item_info["concern_level"],
+                "is_common_allergen": item_info.get("is_common_allergen", False),
+                "note": item_info.get("observations") or item_info.get("simple_explanation") or f"Concern level: {item_info.get('concern_level')}",
             })
+
+    total_detected = len(recognized) + len(unrecognized)
 
     return {
         "is_available": True,
         "message": None,
-        "total_count": len(recognized) + len(unrecognized),
+        "total_count": total_detected,
         "recognized_count": len(recognized),
         "unrecognized_count": len(unrecognized),
         "recognized": recognized,
         "unrecognized": unrecognized,
         "concerns": concerns,
+        "extraction_summary": {
+            "level": extraction_level,
+            "level_label": (
+                "Level 1: Verified Extraction" if extraction_level == "level_1_verified" else
+                "Level 2: AI-Assisted Extraction" if extraction_level == "level_2_ai_assisted" else
+                "Level 3: Estimated Extraction" if extraction_level == "level_3_estimated" else
+                "Level 4: Limited Image Information"
+            ),
+            "method": extraction_method,
+            "overall_confidence": round(confidence, 4),
+            "total_detected": total_detected,
+            "verified_count": verified_count,
+            "ai_assisted_count": ai_assisted_count,
+            "estimated_count": estimated_count,
+            "status_badge_color": "emerald" if "level_1" in extraction_level else "blue" if "level_2" in extraction_level else "amber" if "level_3" in extraction_level else "slate",
+        },
+        "evidence": {
+            "crop_url": crop_url,
+            "raw_source_text": raw_ingredients_text,
+            "uncertain_words": uncertain_words or [],
+        },
+        "allergen_information": {
+            "declared": declared_allergens or [],
+            "precautionary": precautionary_allergens or [],
+            "uncertain": uncertain_allergens or [],
+        },
     }
 
 
@@ -286,7 +507,40 @@ def run_scan_analysis(
     precautionary_allergens = extracted_data.get("precautionary_allergens") or []
 
     # 1. Ingredient Intelligence
-    ingredient_intel = match_and_explain_ingredients(ingredients, db)
+    ing_method = extracted_data.get("ingredient_extraction_method") or (
+        "Multimodal Vision AI" if "vision" in extracted_data.get("ocr_engine", "") else
+        "PaddleOCR + 2D Spatial Parser"
+    )
+    ing_conf = extracted_data.get("ingredient_extraction_confidence") or extracted_data.get("ocr_confidence", 0.0)
+    uncertain_allergens = extracted_data.get("uncertain_allergens") or []
+    crop_url = extracted_data.get("ingredients_crop_url")
+    uncertain_words = extracted_data.get("uncertain_words") or []
+
+    # Calculate extraction level
+    extraction_level = extracted_data.get("ingredient_extraction_level")
+    if not extraction_level:
+        if len(ingredients) > 0 and ing_conf >= 0.75 and "vision" not in extracted_data.get("ocr_engine", ""):
+            extraction_level = "level_1_verified"
+        elif len(ingredients) > 0 and "vision" in extracted_data.get("ocr_engine", ""):
+            extraction_level = "level_2_ai_assisted"
+        elif len(ingredients) > 0:
+            extraction_level = "level_3_estimated"
+        else:
+            extraction_level = "level_4_limited"
+
+    ingredient_intel = match_and_explain_ingredients(
+        ingredients=ingredients,
+        db=db,
+        extraction_level=extraction_level,
+        extraction_method=ing_method,
+        confidence=ing_conf,
+        raw_ingredients_text=raw_ingredients_text,
+        crop_url=crop_url,
+        uncertain_words=uncertain_words,
+        declared_allergens=declared_allergens,
+        precautionary_allergens=precautionary_allergens,
+        uncertain_allergens=uncertain_allergens,
+    )
 
     # 2. Nutrition Scoring
     has_nutrients = False
@@ -491,6 +745,7 @@ async def process_scan_upload(
     ocr_raw_sections: List[str] = []
     confidences: List[float] = []
     all_ocr_lines: List[Any] = []
+    primary_crop_url: Optional[str] = None
     total_prep_ms = 0.0
     total_ocr_ms = 0.0
     total_vis_ms = 0.0
@@ -613,6 +868,21 @@ async def process_scan_upload(
 
             if ocr_res.lines:
                 all_ocr_lines.extend(ocr_res.lines)
+                # Automatic intelligent ingredient region detection and cropping
+                if preprocessed_img is not None:
+                    try:
+                        crop_res = await asyncio.to_thread(
+                            detect_and_crop_ingredient_region,
+                            preprocessed_img,
+                            ocr_res.lines,
+                            UPLOAD_DIR,
+                            scan_id,
+                            idx,
+                        )
+                        if crop_res and not primary_crop_url:
+                            primary_crop_url = crop_res.get("crop_url")
+                    except Exception as e_crop:
+                        logger.warning(f"Ingredient cropping failed: {e_crop}")
 
             if ocr_res.raw_text:
                 header = f"--- [{ltype.upper()} LABEL] ---"
@@ -638,6 +908,8 @@ async def process_scan_upload(
             ocr_engine=engine.__class__.__name__.lower().replace("engine", ""),
             ocr_lines=all_ocr_lines if all_ocr_lines else None,
         )
+        if primary_crop_url:
+            extracted_data["ingredients_crop_url"] = primary_crop_url
 
         # 5b. Multimodal Vision Fallback / Complementary check
         # Only engage vision LLM if OCR could not detect nutrients or ingredients
@@ -663,6 +935,9 @@ async def process_scan_upload(
                     if not has_ocr_ingredients and vision_result.get("ingredients"):
                         extracted_data["ingredients"] = vision_result.get("ingredients")
                         extracted_data["raw_ingredients_text"] = vision_result.get("raw_ingredients_text") or ", ".join(vision_result.get("ingredients"))
+                        extracted_data["ingredient_extraction_level"] = "level_2_ai_assisted"
+                        extracted_data["ingredient_extraction_method"] = "Multimodal Vision AI"
+                        extracted_data["ingredient_extraction_confidence"] = vision_result.get("confidence", 0.94)
 
                     # Merge nutrition facts: augment any nutrient that OCR missed
                     vis_facts = vision_result.get("nutrition_facts") or {}
@@ -694,6 +969,20 @@ async def process_scan_upload(
             # OCR already found everything; cancel vision task if still pending to save quota
             if not vision_task.done():
                 vision_task.cancel()
+
+        # Determine extraction level and method for ingredients if not already set
+        if not extracted_data.get("ingredient_extraction_level"):
+            has_ing = bool(extracted_data.get("ingredients"))
+            ing_conf = extracted_data.get("ingredient_extraction_confidence", avg_confidence)
+            if has_ing and ing_conf >= 0.75:
+                extracted_data["ingredient_extraction_level"] = "level_1_verified"
+                extracted_data["ingredient_extraction_method"] = "PaddleOCR + 2D Spatial Parser"
+            elif has_ing:
+                extracted_data["ingredient_extraction_level"] = "level_3_estimated"
+                extracted_data["ingredient_extraction_method"] = "Heuristic OCR Parser"
+            else:
+                extracted_data["ingredient_extraction_level"] = "level_4_limited"
+                extracted_data["ingredient_extraction_method"] = "OCR Scan"
 
         # Automated analysis: scoring, ingredient intelligence, personalized suitability
         analysis = run_scan_analysis(

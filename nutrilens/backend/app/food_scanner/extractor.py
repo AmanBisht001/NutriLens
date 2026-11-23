@@ -132,13 +132,39 @@ def extract_serving_size(text: str) -> Optional[str]:
     return None
 
 
+def normalize_ingredient_name(raw_name: str) -> str:
+    """
+    Normalizes an ingredient token by:
+    - Stripping leading bullets, numbering, or symbols (*, -, •, 1., etc.)
+    - Cleaning up whitespace inside parentheses and brackets
+    - Formatting INS codes cleanly (e.g. 'INS  500  (ii)' -> 'INS 500(ii)')
+    - Preserving exact parenthetical context and additive numbers (E319, INS 500ii, etc.)
+    """
+    cleaned = raw_name.strip()
+    # Remove leading bullets, numbers, hyphens, asterisks
+    cleaned = re.sub(r"^[\s\-\*\•\d\.\:\)]+", "", cleaned).strip()
+    # Clean up whitespace inside parentheses and brackets
+    cleaned = re.sub(r"\(\s+", "(", cleaned)
+    cleaned = re.sub(r"\s+\)", ")", cleaned)
+    cleaned = re.sub(r"\[\s+", "[", cleaned)
+    cleaned = re.sub(r"\s+\]", "]", cleaned)
+    # Clean up INS codes: e.g. 'INS  500  (ii)' -> 'INS 500(ii)'
+    cleaned = re.sub(r"\bINS\s*[-_]?\s*(\d{3,4})\s*\(\s*([a-zA-Z0-9]+)\s*\)", r"INS \1(\2)", cleaned, flags=re.I)
+    # Strip terminal punctuation
+    cleaned = re.sub(r"[\.,;:_]+$", "", cleaned).strip()
+    return cleaned
+
+
 def split_ingredients_list(raw_ing_text: str) -> List[str]:
     """
-    Splits ingredients by commas and semicolons, respecting nested parentheses,
+    Splits ingredients by commas and semicolons, strictly respecting nested parentheses,
     square brackets, and curly braces (e.g. for additives, INS codes, and sub-ingredients).
     E.g.: 'Refined Wheat Flour, Sugar, Raising Agents [INS 503(ii), INS 500(ii)], Salt'
     -> ['Refined Wheat Flour', 'Sugar', 'Raising Agents [INS 503(ii), INS 500(ii)]', 'Salt']
     """
+    if not raw_ing_text or not raw_ing_text.strip():
+        return []
+
     items = []
     current: List[str] = []
     depth = 0
@@ -155,6 +181,9 @@ def split_ingredients_list(raw_ing_text: str) -> List[str]:
             if token:
                 items.append(token)
             current = []
+        elif char == "\n" and depth == 0:
+            # Newlines outside parentheses can act as delimiters if followed by a capital letter
+            current.append(" ")
         else:
             current.append(char)
 
@@ -166,57 +195,99 @@ def split_ingredients_list(raw_ing_text: str) -> List[str]:
     cleaned = []
     for item in items:
         # Strip trailing dot
-        item = re.sub(r"\.+$", "", item).strip()
-        # Remove leading bullets or dashes
-        item = re.sub(r"^[\s\-\*\•\d\.]+", "", item).strip()
-        if len(item) >= 2:
-            cleaned.append(item)
+        norm = normalize_ingredient_name(item)
+        # Filter out noise fragments (e.g. single letters or pure numbers)
+        if len(norm) >= 2 and not re.match(r"^[0-9\.\%\s]+$", norm):
+            cleaned.append(norm)
 
     return cleaned
 
 
-def extract_ingredients(text: str) -> Tuple[Optional[str], List[str]]:
+def extract_ingredients(text: str, ocr_lines: Optional[List[Any]] = None) -> Tuple[Optional[str], List[str], str, float]:
     """
-    Detects ingredients section and returns (raw_ingredients_text, list_of_individual_ingredients).
-    Handles Indian packaging declarations, parenthesis groups, and additive codes.
+    Detects ingredients section and returns:
+    (raw_ingredients_text, list_of_individual_ingredients, extraction_method, confidence).
+
+    Hierarchical detection:
+    - Level 1: Explicit header match (Ingredients:, List of Ingredients, Contains:)
+    - Level 2 / 3: Heuristic dense ingredient phrase clustering when header is slightly occluded
     """
-    # Regex to find starting tag: "INGREDIENTS:", "INGREDIENTS -", "LIST OF INGREDIENTS:", etc.
+    if not text or not text.strip():
+        return None, [], "none", 0.0
+
+    # Strip artificial section delimiters like '--- [INGREDIENTS LABEL] ---'
+    search_text = re.sub(r"-{2,}\s*\[.*?LABEL\]\s*-{2,}", "", text, flags=re.IGNORECASE).strip()
+
+    # 1. Regex to find starting tag: "INGREDIENTS:", "INGREDIENTS -", "LIST OF INGREDIENTS", "NGREDIENTS", etc.
     start_match = re.search(
-        r"\b(?:list\s+of\s+ingredients?|ingredients?(?:\s*\(as\s+consumed\))?|ingred[a-z]*)\s*[:\-\.\n\(]\s*",
-        text,
+        r"\b(?:list\s+of\s+i[ng]{1,2}red[a-z]*|i[ng]{1,2}rediente?s?(?:\s*\(as\s+consumed\))?|i[ng]{1,2}red[a-z]*|samagri)\s*[:\-\.\n\(\s]\s*",
+        search_text,
         re.IGNORECASE,
     )
-    if not start_match:
-        # Check alternative: text starting with "Contains: ..." where ingredients are listed directly
-        contains_match = re.search(r"\b(?:contains)\s*[:\-\n]\s*([a-zA-Z0-9\s,\(\)%\-\._]{15,})", text, re.IGNORECASE)
-        if contains_match and "," in contains_match.group(1):
-            raw_section = contains_match.group(1).split("\n\n")[0].strip()
-            items = split_ingredients_list(raw_section)
-            return (raw_section if items else None, items)
-        return None, []
 
-    start_idx = start_match.end()
-    remaining = text[start_idx:]
+    raw_section: Optional[str] = None
+    extraction_method = "ocr_header"
+    confidence = 0.92
 
-    # Stop at allergen declaration, nutrition table, or manufacturing details
-    stop_match = re.search(
-        r"(?:\n\s*\n|ALLERGEN\s+INFORMATION|ALLERGENS?|CONTAINS\s+ALLERGENS?|MAY\s+CONTAIN|MFD\s+BY|NUTRITION\s+FACTS|NUTRITION\s+INFORMATION|STORE\s+IN|NET\s+QUANTITY|BATCH\s+NO)",
-        remaining,
-        re.IGNORECASE,
-    )
-    if stop_match:
-        raw_section = remaining[: stop_match.start()]
+    if start_match:
+        start_idx = start_match.end()
+        remaining = search_text[start_idx:]
+
+        # Stop at allergen declaration, nutrition table, manufacturing details, or barcode
+        stop_match = re.search(
+            r"(?:\n\s*\n|ALLERGEN\s+(?:INFORMATION|ADVICE|DECLARATION)|ALLERGENS?\s*[:\-]|CONTAINS\s+ALLERGENS?|MAY\s+CONTAIN|MFD\s+BY|MANUFACTURED\s+BY|NUTRITION(?:AL)?\s+FACTS|NUTRITION(?:AL)?\s+INFORMATION|STORE\s+IN|NET\s+QUANTITY|NET\s+WT|BATCH\s+NO|BEST\s+BEFORE|FSSAI|LIC\s*NO)",
+            remaining,
+            re.IGNORECASE,
+        )
+        if stop_match:
+            raw_section = remaining[: stop_match.start()]
+        else:
+            # If no explicit stop, take up to 8 lines or 800 characters
+            lines = remaining.split("\n")
+            raw_section = " ".join([l.strip() for l in lines[:8] if l.strip()])
     else:
-        # If no explicit stop, take up to 6 lines or 600 characters
-        lines = remaining.split("\n")
-        raw_section = " ".join([l.strip() for l in lines[:6] if l.strip()])
+        # Check alternative: text starting with "Contains: ..." where ingredients are listed directly
+        contains_match = re.search(
+            r"\b(?:contains)\s*[:\-\n]\s*([a-zA-Z0-9\s,\(\)%\-\._\[\]]{20,})",
+            search_text,
+            re.IGNORECASE,
+        )
+        if contains_match and ("," in contains_match.group(1) or ";" in contains_match.group(1)):
+            raw_section = contains_match.group(1).split("\n\n")[0].strip()
+            extraction_method = "ocr_contains"
+            confidence = 0.82
+        else:
+            # Level 3: Density heuristic - check for line with multiple food-related terms and commas
+            food_terms = [
+                "flour", "sugar", "salt", "oil", "water", "milk", "wheat", "cocoa", "butter",
+                "fat", "emulsifier", "preservative", "lecithin", "starch", "yeast", "spices",
+                "flavour", "acid", "gum", "syrup", "extract", "protein", "ins",
+            ]
+            lines = search_text.split("\n")
+            candidate_lines = []
+            for line in lines:
+                l_lower = line.lower()
+                matches = sum(1 for term in food_terms if term in l_lower)
+                commas = line.count(",") + line.count(";")
+                if (matches >= 2 and commas >= 1) or (matches >= 3):
+                    candidate_lines.append(line.strip())
+
+            if candidate_lines:
+                raw_section = " ".join(candidate_lines)
+                extraction_method = "ocr_density_heuristic"
+                confidence = 0.68
+
+    if not raw_section or not raw_section.strip():
+        return None, [], "none", 0.0
 
     raw_section = " ".join(raw_section.split()).strip()
-    # Remove terminal period
     raw_section = re.sub(r"\.+$", "", raw_section).strip()
 
     items = split_ingredients_list(raw_section)
-    return (raw_section if raw_section else None, items)
+    if not items:
+        return None, [], "none", 0.0
+
+    return (raw_section, items, extraction_method, confidence)
 
 
 def _extract_number(patterns: Union[str, List[str]], text: str) -> Optional[float]:
@@ -660,6 +731,21 @@ def extract_allergens(text: str) -> Tuple[List[str], List[str]]:
     return declared, precautionary
 
 
+def extract_uncertain_allergens(text: str) -> List[str]:
+    """Identifies potential hidden allergen sources with ambiguous declarations."""
+    uncertain: List[str] = []
+    uncertain_patterns = [
+        (r"\b(?:lecithin)\b(?!.*\b(?:soy|sunflower|egg)\b)", "Lecithin (source unverified)"),
+        (r"\b(?:modified\s+starch)\b", "Modified Starch (wheat vs corn source unspecified)"),
+        (r"\b(?:gluten)\b", "Gluten source declared"),
+        (r"\b(?:casein|whey)\b", "Milk derivative (Casein/Whey)"),
+    ]
+    for pat, label in uncertain_patterns:
+        if re.search(pat, text, re.IGNORECASE):
+            uncertain.append(label)
+    return uncertain
+
+
 def extract_structured_label_info(
     raw_ocr_text: str,
     ocr_confidence: float = 0.0,
@@ -683,7 +769,7 @@ def extract_structured_label_info(
         if m_serv and "100" not in m_serv.group(1):
             serving_size = m_serv.group(1).strip()
 
-    raw_ingredients_text, ingredients_list = extract_ingredients(cleaned)
+    raw_ingredients_text, ingredients_list, ing_method, ing_conf = extract_ingredients(cleaned, ocr_lines=ocr_lines)
     nutrition_facts = extract_nutrition_facts(cleaned, ocr_lines=ocr_lines)
 
     per_serving_facts: Dict[str, Optional[float]] = {}
@@ -691,6 +777,7 @@ def extract_structured_label_info(
         _, per_serving_facts = extract_nutrition_facts_spatial(ocr_lines)
 
     declared_allergens, precautionary_allergens = extract_allergens(cleaned)
+    uncertain_allergens = extract_uncertain_allergens(cleaned)
 
     # Uncertainty checks:
     if not product_name:
@@ -718,10 +805,13 @@ def extract_structured_label_info(
         "serving_size": serving_size or "100g",
         "raw_ingredients_text": raw_ingredients_text,
         "ingredients": ingredients_list,
+        "ingredient_extraction_method": ing_method,
+        "ingredient_extraction_confidence": ing_conf,
         "nutrition_facts": nutrition_facts,
         "per_serving_nutrition_facts": per_serving_facts,
         "declared_allergens": declared_allergens,
         "precautionary_allergens": precautionary_allergens,
+        "uncertain_allergens": uncertain_allergens,
         "ocr_confidence": round(ocr_confidence, 4),
         "ocr_engine": ocr_engine,
         "uncertainty_flags": uncertainty_flags,
